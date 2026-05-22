@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 const SteamAuth = require('node-steam-openid');
 
 const app = express();
+app.set('trust proxy', 1); 
 
 app.use(cors({
   origin: process.env.CLIENT_ORIGIN,
