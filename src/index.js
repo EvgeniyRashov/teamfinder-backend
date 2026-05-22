@@ -45,7 +45,7 @@ app.get('/auth/steam/authenticate', async (req, res) => {
     res.cookie('tf_token', token, {
       httpOnly: true,
       secure: true,
-      sameSite: 'lax',
+      sameSite: 'none',
       maxAge: 7 * 24 * 60 * 60 * 1000
     });
     return res.redirect(process.env.CLIENT_ORIGIN + '/#home');
@@ -57,7 +57,11 @@ app.get('/auth/steam/authenticate', async (req, res) => {
 
 // выход
 app.post('/auth/logout', (req, res) => {
-  res.clearCookie('tf_token', { httpOnly: true, secure: true, sameSite: 'lax' });
+  res.clearCookie('tf_token', {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'none'
+  });
   return res.json({ ok: true });
 });
 
@@ -79,14 +83,12 @@ app.get('/api/profile/:steamid', async (req, res) => {
   const key = process.env.STEAM_API_KEY;
 
   try {
-    // Базовый профиль Steam
     const [summaryRes, statsRes, hoursRes] = await Promise.allSettled([
       fetch(`https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${key}&steamids=${steamid}`),
       fetch(`https://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v2/?key=${key}&steamid=${steamid}&appid=730`),
       fetch(`https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${key}&steamid=${steamid}&appids_filter[0]=730&include_appinfo=false`)
     ]);
 
-    // Парсим профиль
     let profile = {};
     if (summaryRes.status === 'fulfilled' && summaryRes.value.ok) {
       const data = await summaryRes.value.json();
@@ -102,7 +104,6 @@ app.get('/api/profile/:steamid', async (req, res) => {
       };
     }
 
-    // Парсим статистику CS2
     let stats = {};
     if (statsRes.status === 'fulfilled' && statsRes.value.ok) {
       const data = await statsRes.value.json();
@@ -113,6 +114,8 @@ app.get('/api/profile/:steamid', async (req, res) => {
       const wins = get('total_wins');
       const roundsPlayed = get('total_rounds_played');
       const headshotKills = get('total_kills_headshot');
+      const shots = get('total_shots_fired');
+      const hits = get('total_shots_hit');
       stats = {
         kills,
         deaths,
@@ -122,15 +125,10 @@ app.get('/api/profile/:steamid', async (req, res) => {
         winRate: roundsPlayed > 0 ? ((wins / roundsPlayed) * 100).toFixed(1) : '0',
         hsRate: kills > 0 ? ((headshotKills / kills) * 100).toFixed(1) : '0',
         mvps: get('total_mvps'),
-        accuracy: (() => {
-          const shots = get('total_shots_fired');
-          const hits = get('total_shots_hit');
-          return shots > 0 ? ((hits / shots) * 100).toFixed(1) : '0';
-        })()
+        accuracy: shots > 0 ? ((hits / shots) * 100).toFixed(1) : '0'
       };
     }
 
-    // Часы в CS2
     let hoursCs2 = null;
     if (hoursRes.status === 'fulfilled' && hoursRes.value.ok) {
       const data = await hoursRes.value.json();
