@@ -32,7 +32,7 @@ app.get('/auth/steam', async (req, res) => {
   }
 });
 
-// callback от Steam
+// callback от Steam — передаём токен через URL
 app.get('/auth/steam/authenticate', async (req, res) => {
   try {
     const user = await steam.authenticate(req);
@@ -42,13 +42,7 @@ app.get('/auth/steam/authenticate', async (req, res) => {
       avatar: user.avatar?.medium || null
     };
     const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' });
-    res.cookie('tf_token', token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'none',
-      maxAge: 7 * 24 * 60 * 60 * 1000
-    });
-    return res.redirect(process.env.CLIENT_ORIGIN + '/#home');
+    return res.redirect(process.env.CLIENT_ORIGIN + '/#home?token=' + token);
   } catch (err) {
     console.error('Steam auth error', err);
     return res.status(500).json({ error: 'Steam authenticate failed' });
@@ -57,17 +51,13 @@ app.get('/auth/steam/authenticate', async (req, res) => {
 
 // выход
 app.post('/auth/logout', (req, res) => {
-  res.clearCookie('tf_token', {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'none'
-  });
   return res.json({ ok: true });
 });
 
-// текущий пользователь
+// текущий пользователь — читаем из Authorization header
 app.get('/api/me', (req, res) => {
-  const token = req.cookies.tf_token;
+  const auth = req.headers.authorization;
+  const token = auth?.startsWith('Bearer ') ? auth.slice(7) : req.cookies?.tf_token;
   if (!token) return res.json({ user: null });
   try {
     const data = jwt.verify(token, process.env.JWT_SECRET);
