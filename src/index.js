@@ -4,58 +4,92 @@ const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
-const SteamAuth = require('node-steam-openid');
+const https = require('https');
+const querystring = require('querystring');
 
 const app = express();
-app.set('trust proxy', 1); 
+app.set('trust proxy', 1);
 
-app.use(cors({
-  origin: process.env.CLIENT_ORIGIN,
-  credentials: true
-}));
+app.use(cors({ origin: process.env.CLIENT_ORIGIN, credentials: true }));
 app.use(cookieParser());
 app.use(express.json());
 
-const steam = new SteamAuth({
-  realm: process.env.STEAM_REALM,
-  returnUrl: process.env.STEAM_RETURN_URL,
-  apiKey: process.env.STEAM_API_KEY
+const STEAM_OPENID = 'https://steamcommunity.com/openid/login';
+const RETURN_URL = process.env.STEAM_RETURN_URL;
+const REALM = process.env.STEAM_REALM;
+
+// Редирект на Steam
+app.get('/auth/steam', (req, res) => {
+  const params = querystring.stringify({
+    'openid.ns': 'http://specs.openid.net/auth/2.0',
+    'openid.mode': 'checkid_setup',
+    'openid.return_to': RETURN_URL,
+    'openid.realm': REALM,
+    'openid.identity': 'http://specs.openid.net/auth/2.0/identifier_select',
+    'openid.claimed_id': 'http://specs.openid.net/auth/2.0/identifier_select',
+  });
+  res.redirect(`${STEAM_OPENID}?${params}`);
 });
 
-// редирект на Steam
-app.get('/auth/steam', async (req, res) => {
-  try {
-    const redirectUrl = await steam.getRedirectUrl();
-    return res.redirect(redirectUrl);
-  } catch (err) {
-    console.error('Steam redirect error', err);
-    return res.status(500).json({ error: 'Steam redirect failed' });
-  }
-});
-
-// callback от Steam — передаём токен через URL
+// Callback от Steam
 app.get('/auth/steam/authenticate', async (req, res) => {
   try {
-    const user = await steam.authenticate(req);
+    const query = { ...req.query, 'openid.mode': 'check_authentication' };
+    const body = querystring.stringify(query);
+
+    const response = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: 'steamcommunity.com',
+        path: '/openid/login',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(body),
+        },
+      };
+      let data = '';
+      const request = https.request(options, (r) => {
+        r.on('data', (chunk) => { data += chunk; });
+        r.on('end', () => resolve(data));
+      });
+      request.on('error', reject);
+      request.write(body);
+      request.end();
+    });
+
+    if (!response.includes('is_valid:true')) {
+      return res.status(401).json({ error: 'Steam auth not valid' });
+    }
+
+    const claimedId = req.query['openid.claimed_id'] || '';
+    const steamId = claimedId.replace('https://steamcommunity.com/openid/id/', '');
+    if (!steamId) return res.status(400).json({ error: 'No steamid' });
+
+    // Получаем профиль из Steam API
+    const apiRes = await fetch(
+      `https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${process.env.STEAM_API_KEY}&steamids=${steamId}`
+    );
+    const apiData = await apiRes.json();
+    const p = apiData.response?.players?.[0] || {};
+
     const payload = {
-      steamid: user.steamid,
-      name: user.username,
-      avatar: user.avatar?.medium || null
+      steamid: steamId,
+      name: p.personaname || steamId,
+      avatar: p.avatarmedium || null,
     };
+
     const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' });
-    return res.redirect(process.env.CLIENT_ORIGIN + '/#home?token=' + token);
+    return res.redirect(`${process.env.CLIENT_ORIGIN}/#home?token=${token}`);
   } catch (err) {
     console.error('Steam auth error', err);
     return res.status(500).json({ error: 'Steam authenticate failed' });
   }
 });
 
-// выход
-app.post('/auth/logout', (req, res) => {
-  return res.json({ ok: true });
-});
+// Выход
+app.post('/auth/logout', (req, res) => res.json({ ok: true }));
 
-// текущий пользователь — читаем из Authorization header
+// Текущий пользователь
 app.get('/api/me', (req, res) => {
   const auth = req.headers.authorization;
   const token = auth?.startsWith('Bearer ') ? auth.slice(7) : req.cookies?.tf_token;
@@ -68,16 +102,15 @@ app.get('/api/me', (req, res) => {
   }
 });
 
-// профиль игрока по steamid
+// Профиль игрока по steamid
 app.get('/api/profile/:steamid', async (req, res) => {
   const { steamid } = req.params;
   const key = process.env.STEAM_API_KEY;
-
   try {
     const [summaryRes, statsRes, hoursRes] = await Promise.allSettled([
       fetch(`https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${key}&steamids=${steamid}`),
       fetch(`https://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v2/?key=${key}&steamid=${steamid}&appid=730`),
-      fetch(`https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${key}&steamid=${steamid}&appids_filter[0]=730&include_appinfo=false`)
+      fetch(`https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${key}&steamid=${steamid}&appids_filter[0]=730&include_appinfo=false`),
     ]);
 
     let profile = {};
@@ -85,13 +118,11 @@ app.get('/api/profile/:steamid', async (req, res) => {
       const data = await summaryRes.value.json();
       const p = data.response?.players?.[0] || {};
       profile = {
-        steamid: p.steamid,
-        name: p.personaname,
-        avatar: p.avatarfull,
+        steamid: p.steamid, name: p.personaname, avatar: p.avatarfull,
         profileUrl: p.profileurl,
         status: p.personastate === 1 ? 'online' : p.personastate === 3 ? 'away' : 'offline',
         country: p.loccountrycode || null,
-        createdAt: p.timecreated ? new Date(p.timecreated * 1000).getFullYear() : null
+        createdAt: p.timecreated ? new Date(p.timecreated * 1000).getFullYear() : null,
       };
     }
 
@@ -100,23 +131,17 @@ app.get('/api/profile/:steamid', async (req, res) => {
       const data = await statsRes.value.json();
       const raw = data.playerstats?.stats || [];
       const get = (name) => raw.find(s => s.name === name)?.value || 0;
-      const kills = get('total_kills');
-      const deaths = get('total_deaths');
-      const wins = get('total_wins');
-      const roundsPlayed = get('total_rounds_played');
-      const headshotKills = get('total_kills_headshot');
-      const shots = get('total_shots_fired');
-      const hits = get('total_shots_hit');
+      const kills = get('total_kills'), deaths = get('total_deaths'), wins = get('total_wins');
+      const roundsPlayed = get('total_rounds_played'), headshotKills = get('total_kills_headshot');
+      const shots = get('total_shots_fired'), hits = get('total_shots_hit');
       stats = {
-        kills,
-        deaths,
+        kills, deaths,
         kd: deaths > 0 ? (kills / deaths).toFixed(2) : kills.toFixed(2),
-        wins,
-        roundsPlayed,
+        wins, roundsPlayed,
         winRate: roundsPlayed > 0 ? ((wins / roundsPlayed) * 100).toFixed(1) : '0',
         hsRate: kills > 0 ? ((headshotKills / kills) * 100).toFixed(1) : '0',
         mvps: get('total_mvps'),
-        accuracy: shots > 0 ? ((hits / shots) * 100).toFixed(1) : '0'
+        accuracy: shots > 0 ? ((hits / shots) * 100).toFixed(1) : '0',
       };
     }
 
@@ -135,6 +160,4 @@ app.get('/api/profile/:steamid', async (req, res) => {
 });
 
 const port = process.env.PORT || 5000;
-app.listen(port, () => {
-  console.log('TEAMFINDER backend listening on', port);
-});
+app.listen(port, () => console.log('TEAMFINDER backend listening on', port));
