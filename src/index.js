@@ -79,7 +79,7 @@ app.get('/auth/steam/authenticate', async (req, res) => {
     };
 
     const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' });
-    return res.redirect(`${process.env.CLIENT_ORIGIN}/#home?token=${token}`);
+    return res.redirect(`${process.env.CLIENT_ORIGIN}/?token=${token}`);
   } catch (err) {
     console.error('Steam auth error', err);
     return res.status(500).json({ error: 'Steam authenticate failed' });
