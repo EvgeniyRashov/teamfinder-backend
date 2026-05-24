@@ -1,18 +1,54 @@
 require('dotenv').config();
-
 const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
 const https = require('https');
 const querystring = require('querystring');
+const mongoose = require('mongoose');
 
 const app = express();
 app.set('trust proxy', 1);
-
 app.use(cors({ origin: process.env.CLIENT_ORIGIN, credentials: true }));
 app.use(cookieParser());
 app.use(express.json());
+
+// Подключение к MongoDB
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log('MongoDB connected'))
+  .catch(err => console.error('MongoDB error:', err));
+
+// Схема пользователя
+const UserSchema = new mongoose.Schema({
+  steamid: { type: String, unique: true },
+  name: String,
+  avatar: String,
+  elo: { type: Number, default: 0 },
+  role: { type: String, default: 'any' },
+  region: { type: String, default: 'any' },
+  language: { type: String, default: 'ru' },
+  trustScore: { type: Number, default: 50 },
+  hasMic: { type: Boolean, default: false },
+  isLookingForTeam: { type: Boolean, default: false },
+  isOnline: { type: Boolean, default: false },
+  lastSeen: { type: Date, default: Date.now },
+  createdAt: { type: Date, default: Date.now },
+}, { timestamps: true });
+
+const User = mongoose.model('User', UserSchema);
+
+// Middleware проверки токена
+const authMiddleware = (req, res, next) => {
+  const auth = req.headers.authorization;
+  const token = auth?.startsWith('Bearer ') ? auth.slice(7) : req.cookies?.tf_token;
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    next();
+  } catch {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+};
 
 const STEAM_OPENID = 'https://steamcommunity.com/openid/login';
 const RETURN_URL = process.env.STEAM_RETURN_URL;
@@ -65,12 +101,24 @@ app.get('/auth/steam/authenticate', async (req, res) => {
     const steamId = claimedId.replace('https://steamcommunity.com/openid/id/', '');
     if (!steamId) return res.status(400).json({ error: 'No steamid' });
 
-    // Получаем профиль из Steam API
     const apiRes = await fetch(
       `https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${process.env.STEAM_API_KEY}&steamids=${steamId}`
     );
     const apiData = await apiRes.json();
     const p = apiData.response?.players?.[0] || {};
+
+    // Сохраняем/обновляем юзера в MongoDB
+    await User.findOneAndUpdate(
+      { steamid: steamId },
+      {
+        steamid: steamId,
+        name: p.personaname || steamId,
+        avatar: p.avatarmedium || null,
+        isOnline: true,
+        lastSeen: new Date(),
+      },
+      { upsert: true, new: true }
+    );
 
     const payload = {
       steamid: steamId,
@@ -87,22 +135,36 @@ app.get('/auth/steam/authenticate', async (req, res) => {
 });
 
 // Выход
-app.post('/auth/logout', (req, res) => res.json({ ok: true }));
-
-// Текущий пользователь
-app.get('/api/me', (req, res) => {
-  const auth = req.headers.authorization;
-  const token = auth?.startsWith('Bearer ') ? auth.slice(7) : req.cookies?.tf_token;
-  if (!token) return res.json({ user: null });
-  try {
-    const data = jwt.verify(token, process.env.JWT_SECRET);
-    return res.json({ user: data });
-  } catch {
-    return res.json({ user: null });
-  }
+app.post('/auth/logout', authMiddleware, async (req, res) => {
+  await User.findOneAndUpdate({ steamid: req.user.steamid }, { isOnline: false });
+  res.json({ ok: true });
 });
 
-// Профиль игрока по steamid
+// Текущий пользователь
+app.get('/api/me', authMiddleware, async (req, res) => {
+  const user = await User.findOne({ steamid: req.user.steamid });
+  res.json({ user });
+});
+
+// Поиск игроков
+app.get('/api/players', authMiddleware, async (req, res) => {
+  const { role, region, language, minTrust, minElo, hasMic, limit = 20 } = req.query;
+  const filter = { steamid: { $ne: req.user.steamid } };
+  if (role && role !== 'any') filter.role = role;
+  if (region && region !== 'any') filter.region = region;
+  if (language && language !== 'any') filter.language = language;
+  if (minTrust) filter.trustScore = { $gte: Number(minTrust) };
+  if (minElo) filter.elo = { $gte: Number(minElo) };
+  if (hasMic === 'true') filter.hasMic = true;
+
+  const players = await User.find(filter)
+    .sort({ isOnline: -1, trustScore: -1 })
+    .limit(Number(limit));
+
+  res.json({ players });
+});
+
+// Профиль игрока
 app.get('/api/profile/:steamid', async (req, res) => {
   const { steamid } = req.params;
   const key = process.env.STEAM_API_KEY;
