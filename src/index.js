@@ -28,7 +28,7 @@ app.use(cors({
 app.use(cookieParser());
 app.use(express.json());
 
-// Healthcheck (нужно для Railway)
+// Healthcheck
 app.get('/', (req, res) => res.send('TEAMFINDER Backend is running!'));
 
 if (!process.env.MONGODB_URI) {
@@ -81,7 +81,7 @@ const User = mongoose.model('User', UserSchema);
 // ============================================================
 const NotifSchema = new mongoose.Schema({
   userId: { type: String, required: true },
-  type: String, // 'invites', 'friends', 'system'
+  type: String, // 'invites', 'friends', 'system', 'message'
   icon: String,
   ic: String,
   title: String,
@@ -89,9 +89,31 @@ const NotifSchema = new mongoose.Schema({
   time: { type: Date, default: Date.now },
   unread: { type: Boolean, default: true },
   actions: [String],
-  payload: mongoose.Schema.Types.Mixed // to store sender steamid, avatar, stats
+  payload: mongoose.Schema.Types.Mixed 
 });
 const Notification = mongoose.model('Notification', NotifSchema);
+
+// ============================================================
+// LOBBY SCHEMA
+// ============================================================
+const LobbySchema = new mongoose.Schema({
+  ownerId: { type: String, required: true },
+  members: [{ type: String }], // array of steamids
+  gameMode: { type: String, default: 'Premier' },
+  status: { type: String, default: 'waiting' }, // waiting, in_game
+}, { timestamps: true });
+const Lobby = mongoose.model('Lobby', LobbySchema);
+
+// ============================================================
+// MESSAGE SCHEMA (Private, strictly authorized)
+// ============================================================
+const MessageSchema = new mongoose.Schema({
+  senderId: { type: String, required: true },
+  receiverId: { type: String, required: true },
+  text: { type: String, required: true },
+  isRead: { type: Boolean, default: false }
+}, { timestamps: true });
+const Message = mongoose.model('Message', MessageSchema);
 
 // ============================================================
 // REPORT SCHEMA
@@ -101,7 +123,7 @@ const ReportSchema = new mongoose.Schema({
   authorSteamId: { type: String, required: true },
   reason: { type: String, required: true },
   details: { type: String, default: '' },
-  status: { type: String, default: 'Рассматривается' }, // Рассматривается, Подтвержден, Отклонен
+  status: { type: String, default: 'Рассматривается' }, 
   createdAt: { type: Date, default: Date.now }
 });
 const Report = mongoose.model('Report', ReportSchema);
@@ -274,6 +296,148 @@ app.post('/api/notifications/read', authMiddleware, async (req, res) => {
 });
 
 // ============================================================
+// API: MESSAGES (Strictly Private)
+// ============================================================
+app.get('/api/messages/:targetId', authMiddleware, async (req, res) => {
+  try {
+    const messages = await Message.find({
+      $or: [
+        { senderId: req.user.steamid, receiverId: req.params.targetId },
+        { senderId: req.params.targetId, receiverId: req.user.steamid }
+      ]
+    }).sort({ createdAt: 1 });
+    
+    res.json(messages);
+  } catch(err) {
+    res.status(500).json({ error: 'Failed to load messages' });
+  }
+});
+
+app.post('/api/messages/send', authMiddleware, async (req, res) => {
+  try {
+    const { targetId, text } = req.body;
+    if (!text || !text.trim()) return res.status(400).json({ error: 'Empty message' });
+    if (targetId === req.user.steamid) return res.status(400).json({ error: 'Cannot send to yourself' });
+
+    const msg = await Message.create({
+      senderId: req.user.steamid,
+      receiverId: targetId,
+      text: text.trim()
+    });
+
+    const me = await User.findOne({ steamid: req.user.steamid });
+    await Notification.create({
+      userId: targetId,
+      type: 'message',
+      icon: '💬',
+      ic: 'fr', 
+      title: `Новое сообщение от ${me.name}`,
+      body: text.substring(0, 50) + (text.length > 50 ? '...' : ''),
+      unread: true,
+      actions: ['Ответить'],
+      payload: { senderId: me.steamid }
+    });
+
+    res.json({ ok: true, message: msg });
+  } catch(err) {
+    res.status(500).json({ error: 'Failed to send message' });
+  }
+});
+
+// ============================================================
+// API: LOBBY
+// ============================================================
+app.get('/api/lobby/me', authMiddleware, async (req, res) => {
+  try {
+    const lobby = await Lobby.findOne({ members: req.user.steamid });
+    if (!lobby) return res.json({ lobby: null });
+
+    const membersData = await User.find({ steamid: { $in: lobby.members } })
+      .select('steamid name avatar role elo mmrank isOnline');
+    
+    res.json({ lobby, membersData });
+  } catch(err) {
+    res.status(500).json({ error: 'Failed to fetch lobby' });
+  }
+});
+
+app.post('/api/lobby/invite', authMiddleware, async (req, res) => {
+  try {
+    const { targetId } = req.body;
+    if (targetId === req.user.steamid) return res.status(400).json({ error: 'Cannot invite yourself' });
+
+    let lobby = await Lobby.findOne({ members: req.user.steamid });
+    if (!lobby) {
+      lobby = await Lobby.create({
+        ownerId: req.user.steamid,
+        members: [req.user.steamid]
+      });
+    }
+
+    if (lobby.members.length >= 5) return res.status(400).json({ error: 'Lobby is full' });
+
+    const me = await User.findOne({ steamid: req.user.steamid });
+    await Notification.create({
+      userId: targetId,
+      type: 'invites',
+      icon: '🎯',
+      ic: 'inv',
+      title: `${me.name} приглашает в лобби`,
+      body: `Игроков: ${lobby.members.length}/5`,
+      unread: true,
+      actions: ['Принять инвайт', 'Отклонить'],
+      payload: { lobbyId: lobby._id, senderId: req.user.steamid }
+    });
+
+    res.json({ ok: true });
+  } catch(err) {
+    res.status(500).json({ error: 'Failed to send invite' });
+  }
+});
+
+app.post('/api/lobby/join', authMiddleware, async (req, res) => {
+  try {
+    const { lobbyId, notifId } = req.body;
+    const lobby = await Lobby.findById(lobbyId);
+    if (!lobby) return res.status(404).json({ error: 'Lobby not found' });
+    if (lobby.members.length >= 5) return res.status(400).json({ error: 'Lobby is full' });
+
+    await Lobby.updateMany({}, { $pull: { members: req.user.steamid } });
+    
+    if (!lobby.members.includes(req.user.steamid)) {
+      lobby.members.push(req.user.steamid);
+      await lobby.save();
+    }
+
+    if (notifId) {
+      await Notification.findByIdAndUpdate(notifId, { unread: false, actions: [] });
+    }
+
+    res.json({ ok: true });
+  } catch(err) {
+    res.status(500).json({ error: 'Failed to join lobby' });
+  }
+});
+
+app.post('/api/lobby/leave', authMiddleware, async (req, res) => {
+  try {
+    const lobby = await Lobby.findOne({ members: req.user.steamid });
+    if (lobby) {
+      lobby.members = lobby.members.filter(id => id !== req.user.steamid);
+      if (lobby.members.length === 0) {
+        await Lobby.findByIdAndDelete(lobby._id);
+      } else {
+        if (lobby.ownerId === req.user.steamid) lobby.ownerId = lobby.members[0];
+        await lobby.save();
+      }
+    }
+    res.json({ ok: true });
+  } catch(err) {
+    res.status(500).json({ error: 'Failed to leave lobby' });
+  }
+});
+
+// ============================================================
 // API: REPORTS
 // ============================================================
 app.post('/api/reports/add', authMiddleware, async (req, res) => {
@@ -281,7 +445,6 @@ app.post('/api/reports/add', authMiddleware, async (req, res) => {
     const { targetSteamId, reason, details } = req.body;
     if (targetSteamId === req.user.steamid) return res.status(400).json({ error: 'Cannot report yourself' });
     
-    // Check if recently reported
     const recent = await Report.findOne({ authorSteamId: req.user.steamid, targetSteamId, status: 'Рассматривается' });
     if (recent) return res.status(400).json({ error: 'Вы уже отправили репорт на этого игрока' });
 
@@ -292,7 +455,6 @@ app.post('/api/reports/add', authMiddleware, async (req, res) => {
       details
     });
 
-    // Уменьшаем Trust Score у нарушителя на 1 балл
     await User.findOneAndUpdate({ steamid: targetSteamId }, { $inc: { trustScore: -1 } });
 
     res.json({ ok: true });
@@ -313,12 +475,10 @@ app.post('/api/friends/add', authMiddleware, async (req, res) => {
     const target = await User.findOne({ steamid: targetSteamId });
     if (!target) return res.status(404).json({ error: 'Target not found' });
     
-    // Check if already friends
     if (target.friends && target.friends.some(f => f.steamid === req.user.steamid)) {
       return res.status(400).json({ error: 'Already friends' });
     }
 
-    // Check if notification already exists
     const existing = await Notification.findOne({ userId: targetSteamId, type: 'friends', 'payload.senderId': req.user.steamid, unread: true });
     if (existing) return res.status(400).json({ error: 'Request already sent' });
 
@@ -360,7 +520,6 @@ app.post('/api/friends/accept', authMiddleware, async (req, res) => {
 
     if (!sender || !me) return res.status(404).json({ error: 'User not found' });
 
-    // Add to each other's friend lists
     const friendForMe = {
       steamid: sender.steamid,
       name: sender.name,
@@ -389,7 +548,6 @@ app.post('/api/friends/accept', authMiddleware, async (req, res) => {
     await me.save();
     await sender.save();
 
-    // Mark notif as read
     notif.unread = false;
     notif.actions = [];
     notif.body = `Вы приняли запрос от ${sender.name}`;
