@@ -56,7 +56,7 @@ const UserSchema = new mongoose.Schema({
   mode:            { type: String, default: 'Premier' },
   region:          { type: String, default: 'any' },
   language:        { type: String, default: 'ru' },
-  trustScore:      { type: Number, default: 50 },
+  trustScore:      { type: Number, default: 0 }, // <--- Теперь у всех новых игроков 0
   commends: {
     teamPlayer: { type: Number, default: 0 },
     friendly:   { type: Number, default: 0 },
