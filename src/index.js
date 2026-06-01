@@ -26,6 +26,9 @@ mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected'))
   .catch(err => console.error('MongoDB error', err));
 
+// ============================================================
+// SCHEMA
+// ============================================================
 const UserSchema = new mongoose.Schema({
   steamid:         { type: String, unique: true, required: true },
   name:            String,
@@ -44,10 +47,25 @@ const UserSchema = new mongoose.Schema({
   isLookingForTeam:{ type: Boolean, default: false },
   isOnline:        { type: Boolean, default: false },
   lastSeen:        { type: Date, default: Date.now },
+  // Поле для хранения реальных тиммейтов
+  teammates: [{
+    steamid: String,
+    name: String,
+    avatar: String,
+    matches: { type: Number, default: 0 },
+    role: String,
+    elo: Number,
+    faceit: Number,
+    mmrank: String,
+    lastPlayedAt: Date
+  }],
 }, { timestamps: true });
 
 const User = mongoose.model('User', UserSchema);
 
+// ============================================================
+// AUTH MIDDLEWARE
+// ============================================================
 const authMiddleware = (req, res, next) => {
   const auth  = req.headers.authorization;
   const token = auth?.startsWith('Bearer ') ? auth.slice(7) : req.cookies?.tf_token;
@@ -64,6 +82,9 @@ const STEAM_OPENID = 'https://steamcommunity.com/openid/login';
 const RETURN_URL   = process.env.STEAM_RETURN_URL;
 const REALM        = process.env.STEAM_REALM;
 
+// ============================================================
+// STEAM AUTH
+// ============================================================
 app.get('/auth/steam', (req, res) => {
   const params = querystring.stringify({
     'openid.ns':         'http://specs.openid.net/auth/2.0',
@@ -127,11 +148,17 @@ app.post('/auth/logout', authMiddleware, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ============================================================
+// API: ME
+// ============================================================
 app.get('/api/me', authMiddleware, async (req, res) => {
   const user = await User.findOne({ steamid: req.user.steamid });
   res.json({ user });
 });
 
+// ============================================================
+// API: SETTINGS
+// ============================================================
 app.post('/api/settings', authMiddleware, async (req, res) => {
   try {
     const { nick, bio, role, mode, region, lang, elo, faceit, mmrank, hasMic } = req.body;
@@ -154,6 +181,9 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
   }
 });
 
+// ============================================================
+// API: PLAYERS
+// ============================================================
 app.get('/api/players', async (req, res) => {
   try {
     const { role, region, language, minTrust, minElo, minFaceit, mmrank, hasMic, limit = 50 } = req.query;
@@ -179,6 +209,9 @@ app.get('/api/players', async (req, res) => {
   }
 });
 
+// ============================================================
+// API: PROFILE
+// ============================================================
 app.get('/api/profile/:steamid', async (req, res) => {
   const { steamid } = req.params;
   const key = process.env.STEAM_API_KEY;
@@ -236,9 +269,11 @@ app.get('/api/profile/:steamid', async (req, res) => {
       if (game) hoursCs2 = Math.round(game.playtime_forever / 60);
     }
 
-    const dbUser = await User.findOne({ steamid }).select('elo faceit mmrank role mode region nick bio trustScore');
+    // Забираем поле teammates из базы данных
+    const dbUser = await User.findOne({ steamid }).select('elo faceit mmrank role mode region nick bio trustScore teammates');
 
-    return res.json({ profile, stats, hoursCs2, gameData: dbUser || null });
+    // Возвращаем teammates на фронтенд
+    return res.json({ profile, stats, hoursCs2, gameData: dbUser || null, teammates: dbUser?.teammates || [] });
   } catch(err) {
     console.error('Profile fetch error', err);
     return res.status(500).json({ error: 'Failed to fetch profile' });
