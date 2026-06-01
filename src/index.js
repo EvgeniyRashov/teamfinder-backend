@@ -57,6 +57,11 @@ const UserSchema = new mongoose.Schema({
   region:          { type: String, default: 'any' },
   language:        { type: String, default: 'ru' },
   trustScore:      { type: Number, default: 50 },
+  commends: {
+    teamPlayer: { type: Number, default: 0 },
+    friendly:   { type: Number, default: 0 },
+    leader:     { type: Number, default: 0 }
+  },
   hasMic:          { type: Boolean, default: false },
   isLookingForTeam:{ type: Boolean, default: false },
   isOnline:        { type: Boolean, default: false },
@@ -127,6 +132,20 @@ const ReportSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 const Report = mongoose.model('Report', ReportSchema);
+
+// ============================================================
+// COMMEND SCHEMA (Likes)
+// ============================================================
+const CommendSchema = new mongoose.Schema({
+  targetSteamId: { type: String, required: true },
+  authorSteamId: { type: String, required: true },
+  type: { type: String, required: true }, // 'teamPlayer', 'friendly', 'leader'
+  createdAt: { type: Date, default: Date.now }
+});
+// Compound index to prevent multiple same likes from same user
+CommendSchema.index({ targetSteamId: 1, authorSteamId: 1, type: 1 }, { unique: true });
+const Commend = mongoose.model('Commend', CommendSchema);
+
 
 // ============================================================
 // AUTH MIDDLEWARE
@@ -438,6 +457,34 @@ app.post('/api/lobby/leave', authMiddleware, async (req, res) => {
 });
 
 // ============================================================
+// API: COMMENDS (Likes)
+// ============================================================
+app.post('/api/commends/add', authMiddleware, async (req, res) => {
+  try {
+    const { targetSteamId, type } = req.body;
+    if (targetSteamId === req.user.steamid) return res.status(400).json({ error: 'Нельзя лайкать себя' });
+    if (!['teamPlayer', 'friendly', 'leader'].includes(type)) return res.status(400).json({ error: 'Invalid type' });
+
+    // Check if already commended
+    const existing = await Commend.findOne({ targetSteamId, authorSteamId: req.user.steamid, type });
+    if (existing) return res.status(400).json({ error: 'Вы уже ставили этот лайк данному игроку' });
+
+    await Commend.create({ targetSteamId, authorSteamId: req.user.steamid, type });
+
+    const incField = `commends.${type}`;
+    await User.findOneAndUpdate(
+      { steamid: targetSteamId }, 
+      { $inc: { [incField]: 1, trustScore: 2 } }
+    );
+
+    res.json({ ok: true });
+  } catch(err) {
+    if (err.code === 11000) return res.status(400).json({ error: 'Вы уже ставили этот лайк' });
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// ============================================================
 // API: REPORTS
 // ============================================================
 app.post('/api/reports/add', authMiddleware, async (req, res) => {
@@ -620,7 +667,7 @@ app.get('/api/profile/:steamid', async (req, res) => {
       if (game) hoursCs2 = Math.round(game.playtime_forever / 60);
     }
 
-    const dbUser = await User.findOne({ steamid }).select('elo faceit mmrank role mode region nick bio trustScore friends');
+    const dbUser = await User.findOne({ steamid }).select('elo faceit mmrank role mode region nick bio trustScore friends commends');
     const reports = await Report.find({ targetSteamId: steamid }).sort({ createdAt: -1 }).limit(10);
 
     return res.json({ profile, stats, hoursCs2, gameData: dbUser || null, friends: dbUser?.friends || [], reports });
