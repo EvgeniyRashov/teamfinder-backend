@@ -11,14 +11,13 @@ const mongoose   = require('mongoose');
 const app = express();
 app.set('trust proxy', 1);
 
-// ОБНОВЛЕННЫЙ CORS, который пропускает все запросы с твоего Vercel
 const allowedOrigins = ['https://teamfinder-pwa.vercel.app', 'http://localhost:3000', 'http://127.0.0.1:5500', 'http://localhost:5000'];
 app.use(cors({
   origin: function(origin, callback) {
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      callback(null, true); // Пропускаем всё для безопасности (чтобы точно не падало)
+      callback(null, true); 
     }
   },
   credentials: true,
@@ -93,6 +92,19 @@ const NotifSchema = new mongoose.Schema({
   payload: mongoose.Schema.Types.Mixed // to store sender steamid, avatar, stats
 });
 const Notification = mongoose.model('Notification', NotifSchema);
+
+// ============================================================
+// REPORT SCHEMA
+// ============================================================
+const ReportSchema = new mongoose.Schema({
+  targetSteamId: { type: String, required: true },
+  authorSteamId: { type: String, required: true },
+  reason: { type: String, required: true },
+  details: { type: String, default: '' },
+  status: { type: String, default: 'Рассматривается' }, // Рассматривается, Подтвержден, Отклонен
+  createdAt: { type: Date, default: Date.now }
+});
+const Report = mongoose.model('Report', ReportSchema);
 
 // ============================================================
 // AUTH MIDDLEWARE
@@ -262,6 +274,35 @@ app.post('/api/notifications/read', authMiddleware, async (req, res) => {
 });
 
 // ============================================================
+// API: REPORTS
+// ============================================================
+app.post('/api/reports/add', authMiddleware, async (req, res) => {
+  try {
+    const { targetSteamId, reason, details } = req.body;
+    if (targetSteamId === req.user.steamid) return res.status(400).json({ error: 'Cannot report yourself' });
+    
+    // Check if recently reported
+    const recent = await Report.findOne({ authorSteamId: req.user.steamid, targetSteamId, status: 'Рассматривается' });
+    if (recent) return res.status(400).json({ error: 'Вы уже отправили репорт на этого игрока' });
+
+    await Report.create({
+      targetSteamId,
+      authorSteamId: req.user.steamid,
+      reason,
+      details
+    });
+
+    // Уменьшаем Trust Score у нарушителя на 1 балл
+    await User.findOneAndUpdate({ steamid: targetSteamId }, { $inc: { trustScore: -1 } });
+
+    res.json({ ok: true });
+  } catch(err) {
+    console.error('Report error', err);
+    res.status(500).json({ error: 'Failed to submit report' });
+  }
+});
+
+// ============================================================
 // API: FRIENDS
 // ============================================================
 app.post('/api/friends/add', authMiddleware, async (req, res) => {
@@ -422,8 +463,9 @@ app.get('/api/profile/:steamid', async (req, res) => {
     }
 
     const dbUser = await User.findOne({ steamid }).select('elo faceit mmrank role mode region nick bio trustScore friends');
+    const reports = await Report.find({ targetSteamId: steamid }).sort({ createdAt: -1 }).limit(10);
 
-    return res.json({ profile, stats, hoursCs2, gameData: dbUser || null, friends: dbUser?.friends || [] });
+    return res.json({ profile, stats, hoursCs2, gameData: dbUser || null, friends: dbUser?.friends || [], reports });
   } catch(err) {
     console.error('Profile fetch error', err);
     return res.status(500).json({ error: 'Failed to fetch profile' });
