@@ -47,8 +47,7 @@ const UserSchema = new mongoose.Schema({
   isLookingForTeam:{ type: Boolean, default: false },
   isOnline:        { type: Boolean, default: false },
   lastSeen:        { type: Date, default: Date.now },
-  // Поле для хранения реальных тиммейтов
-  teammates: [{
+  friends: [{
     steamid: String,
     name: String,
     avatar: String,
@@ -62,6 +61,25 @@ const UserSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const User = mongoose.model('User', UserSchema);
+
+
+// ============================================================
+// NOTIFICATIONS SCHEMA
+// ============================================================
+const NotifSchema = new mongoose.Schema({
+  userId: { type: String, required: true },
+  type: String, // 'invites', 'friends', 'system'
+  icon: String,
+  ic: String,
+  title: String,
+  body: String,
+  time: { type: Date, default: Date.now },
+  unread: { type: Boolean, default: true },
+  actions: [String],
+  payload: mongoose.Schema.Types.Mixed // to store sender steamid, avatar, stats
+});
+const Notification = mongoose.model('Notification', NotifSchema);
+
 
 // ============================================================
 // AUTH MIDDLEWARE
@@ -210,75 +228,6 @@ app.get('/api/players', async (req, res) => {
 });
 
 // ============================================================
-// API: PROFILE
+// API: NOTIFICATIONS
 // ============================================================
-app.get('/api/profile/:steamid', async (req, res) => {
-  const { steamid } = req.params;
-  const key = process.env.STEAM_API_KEY;
-  try {
-    if (typeof fetch === 'undefined') {
-      return res.status(500).json({ error: 'Node version < 18. Native fetch is required.' });
-    }
-
-    const [summaryRes, statsRes, hoursRes] = await Promise.allSettled([
-      fetch(`https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${key}&steamids=${steamid}`),
-      fetch(`https://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v2/?key=${key}&steamid=${steamid}&appid=730`),
-      fetch(`https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${key}&steamid=${steamid}&appids_filter[0]=730&include_appinfo=false`),
-    ]);
-
-    let profile = null;
-    if (summaryRes.status === 'fulfilled' && summaryRes.value.ok) {
-      const data = await summaryRes.value.json();
-      const p    = data.response?.players?.[0];
-      if (p) {
-        profile = {
-          steamid: p.steamid, name: p.personaname, avatar: p.avatarfull,
-          profileUrl: p.profileurl,
-          status: p.personastate === 1 ? 'online' : p.personastate === 3 ? 'away' : 'offline',
-          country: p.loccountrycode || null,
-          createdAt: p.timecreated ? new Date(p.timecreated * 1000).getFullYear() : null,
-        };
-      }
-    }
-
-    let stats = null;
-    if (statsRes.status === 'fulfilled' && statsRes.value.ok) {
-      const data = await statsRes.value.json();
-      const raw  = data.playerstats?.stats;
-      if (raw && Array.isArray(raw)) {
-        const get  = name => raw.find(s => s.name === name)?.value || 0;
-        const kills = get('total_kills'), deaths = get('total_deaths'), wins = get('total_wins');
-        const roundsPlayed = get('total_rounds_played'), headshotKills = get('total_kills_headshot');
-        const shots = get('total_shots_fired'), hits = get('total_shots_hit');
-        stats = {
-          kills, deaths,
-          kd:       deaths > 0 ? (kills / deaths).toFixed(2) : kills.toFixed(2),
-          wins, roundsPlayed,
-          winRate:  roundsPlayed > 0 ? (wins / roundsPlayed * 100).toFixed(1) : 0,
-          hsRate:   kills > 0 ? (headshotKills / kills * 100).toFixed(1) : 0,
-          mvps:     get('total_mvps'),
-          accuracy: shots > 0 ? (hits / shots * 100).toFixed(1) : 0,
-        };
-      }
-    }
-
-    let hoursCs2 = null;
-    if (hoursRes.status === 'fulfilled' && hoursRes.value.ok) {
-      const data = await hoursRes.value.json();
-      const game = data.response?.games?.[0];
-      if (game) hoursCs2 = Math.round(game.playtime_forever / 60);
-    }
-
-    // Забираем поле teammates из базы данных
-    const dbUser = await User.findOne({ steamid }).select('elo faceit mmrank role mode region nick bio trustScore teammates');
-
-    // Возвращаем teammates на фронтенд
-    return res.json({ profile, stats, hoursCs2, gameData: dbUser || null, teammates: dbUser?.teammates || [] });
-  } catch(err) {
-    console.error('Profile fetch error', err);
-    return res.status(500).json({ error: 'Failed to fetch profile' });
-  }
-});
-
-const port = process.env.PORT || 5000;
-app.listen(port, () => console.log(`TEAMFINDER backend listening on ${port}`));
+app.get('/api/notifications', 
