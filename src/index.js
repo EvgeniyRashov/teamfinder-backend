@@ -56,7 +56,7 @@ const UserSchema = new mongoose.Schema({
   mode:            { type: String, default: 'Premier' },
   region:          { type: String, default: 'any' },
   language:        { type: String, default: 'ru' },
-  trustScore:      { type: Number, default: 0 }, // <--- Теперь у всех новых игроков 0
+  trustScore:      { type: Number, default: 0 },
   commends: {
     teamPlayer: { type: Number, default: 0 },
     friendly:   { type: Number, default: 0 },
@@ -148,7 +148,7 @@ const Commend = mongoose.model('Commend', CommendSchema);
 
 
 // ============================================================
-// AUTH MIDDLEWARE
+// AUTH MIDDLEWARE (Улучшенная защита)
 // ============================================================
 const authMiddleware = (req, res, next) => {
   const auth  = req.headers.authorization;
@@ -156,6 +156,10 @@ const authMiddleware = (req, res, next) => {
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
   try {
     req.user = jwt.verify(token, process.env.JWT_SECRET);
+    // Блокируем сломанные токены с undefined ID
+    if (!req.user || !req.user.steamid || req.user.steamid === 'undefined' || req.user.steamid === 'null') {
+      return res.status(401).json({ error: 'Invalid user session ID' });
+    }
     next();
   } catch(err) {
     res.status(401).json({ error: 'Invalid token' });
@@ -272,6 +276,9 @@ app.get('/api/players', async (req, res) => {
   try {
     const { role, region, language, minTrust, minElo, minFaceit, mmrank, hasMic, limit = 50 } = req.query;
     const filter = {};
+    // Исключаем забагованные записи из выдачи
+    filter.steamid = { $ne: 'undefined', $ne: 'null', $exists: true };
+
     if (role     && role     !== 'any') filter.role     = role;
     if (region   && region   !== 'any') filter.region   = region;
     if (language && language !== 'any') filter.language = language;
@@ -319,10 +326,15 @@ app.post('/api/notifications/read', authMiddleware, async (req, res) => {
 // ============================================================
 app.get('/api/messages/:targetId', authMiddleware, async (req, res) => {
   try {
+    const { targetId } = req.params;
+    if (!targetId || targetId === 'undefined' || targetId === 'null') {
+      return res.status(400).json({ error: 'Некорректный ID получателя' });
+    }
+
     const messages = await Message.find({
       $or: [
-        { senderId: req.user.steamid, receiverId: req.params.targetId },
-        { senderId: req.params.targetId, receiverId: req.user.steamid }
+        { senderId: req.user.steamid, receiverId: targetId },
+        { senderId: targetId, receiverId: req.user.steamid }
       ]
     }).sort({ createdAt: 1 });
     
@@ -335,6 +347,12 @@ app.get('/api/messages/:targetId', authMiddleware, async (req, res) => {
 app.post('/api/messages/send', authMiddleware, async (req, res) => {
   try {
     const { targetId, text } = req.body;
+    
+    // ДОБАВЛЕНА ПРОВЕРКА
+    if (!targetId || targetId === 'undefined' || targetId === 'null') {
+      return res.status(400).json({ error: 'Некорректный ID получателя' });
+    }
+
     if (!text || !text.trim()) return res.status(400).json({ error: 'Empty message' });
     if (targetId === req.user.steamid) return res.status(400).json({ error: 'Cannot send to yourself' });
 
@@ -383,6 +401,12 @@ app.get('/api/lobby/me', authMiddleware, async (req, res) => {
 app.post('/api/lobby/invite', authMiddleware, async (req, res) => {
   try {
     const { targetId } = req.body;
+    
+    // ДОБАВЛЕНА ПРОВЕРКА
+    if (!targetId || targetId === 'undefined' || targetId === 'null') {
+      return res.status(400).json({ error: 'Некорректный ID пользователя' });
+    }
+
     if (targetId === req.user.steamid) return res.status(400).json({ error: 'Cannot invite yourself' });
 
     let lobby = await Lobby.findOne({ members: req.user.steamid });
@@ -462,6 +486,12 @@ app.post('/api/lobby/leave', authMiddleware, async (req, res) => {
 app.post('/api/commends/add', authMiddleware, async (req, res) => {
   try {
     const { targetSteamId, type } = req.body;
+
+    // ДОБАВЛЕНА ПРОВЕРКА
+    if (!targetSteamId || targetSteamId === 'undefined' || targetSteamId === 'null') {
+      return res.status(400).json({ error: 'Некорректный ID пользователя' });
+    }
+
     if (targetSteamId === req.user.steamid) return res.status(400).json({ error: 'Нельзя лайкать себя' });
     if (!['teamPlayer', 'friendly', 'leader'].includes(type)) return res.status(400).json({ error: 'Invalid type' });
 
@@ -490,6 +520,12 @@ app.post('/api/commends/add', authMiddleware, async (req, res) => {
 app.post('/api/reports/add', authMiddleware, async (req, res) => {
   try {
     const { targetSteamId, reason, details } = req.body;
+
+    // ДОБАВЛЕНА ПРОВЕРКА
+    if (!targetSteamId || targetSteamId === 'undefined' || targetSteamId === 'null') {
+      return res.status(400).json({ error: 'Некорректный ID пользователя' });
+    }
+
     if (targetSteamId === req.user.steamid) return res.status(400).json({ error: 'Cannot report yourself' });
     
     const recent = await Report.findOne({ authorSteamId: req.user.steamid, targetSteamId, status: 'Рассматривается' });
@@ -514,9 +550,31 @@ app.post('/api/reports/add', authMiddleware, async (req, res) => {
 // ============================================================
 // API: FRIENDS
 // ============================================================
+app.get('/api/friends', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ steamid: req.user.steamid }).select('friends');
+    if (!user || !user.friends) return res.json([]);
+    
+    // Можно подтянуть актуальные статусы онлайна для друзей
+    const friendIds = user.friends.map(f => f.steamid);
+    const updatedFriends = await User.find({ steamid: { $in: friendIds } })
+      .select('steamid name avatar nick isOnline');
+      
+    res.json(updatedFriends);
+  } catch(err) {
+    res.status(500).json({ error: 'Failed to fetch friends' });
+  }
+});
+
 app.post('/api/friends/add', authMiddleware, async (req, res) => {
   try {
     const { targetSteamId } = req.body;
+    
+    // ДОБАВЛЕНА ПРОВЕРКА
+    if (!targetSteamId || targetSteamId === 'undefined' || targetSteamId === 'null') {
+      return res.status(400).json({ error: 'Некорректный ID пользователя' });
+    }
+
     if (targetSteamId === req.user.steamid) return res.status(400).json({ error: 'Cannot add yourself' });
     
     const target = await User.findOne({ steamid: targetSteamId });
@@ -612,6 +670,12 @@ app.post('/api/friends/accept', authMiddleware, async (req, res) => {
 // ============================================================
 app.get('/api/profile/:steamid', async (req, res) => {
   const { steamid } = req.params;
+  
+  // ДОБАВЛЕНА ПРОВЕРКА: Если steamid сломан, не стучимся в Steam API
+  if (!steamid || steamid === 'undefined' || steamid === 'null') {
+    return res.status(400).json({ error: 'Invalid steamid' });
+  }
+
   const key = process.env.STEAM_API_KEY;
   try {
     if (typeof fetch === 'undefined') {
