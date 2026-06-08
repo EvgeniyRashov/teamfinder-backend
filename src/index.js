@@ -146,6 +146,18 @@ const CommendSchema = new mongoose.Schema({
 CommendSchema.index({ targetSteamId: 1, authorSteamId: 1, type: 1 }, { unique: true });
 const Commend = mongoose.model('Commend', CommendSchema);
 
+// ============================================================
+// COMMENT SCHEMA
+// ============================================================
+const CommentSchema = new mongoose.Schema({
+  targetSteamId: { type: String, required: true }, // кому написали
+  authorSteamId: { type: String, required: true }, // кто написал
+  authorName: { type: String },
+  authorAvatar: { type: String },
+  text: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now }
+});
+const Comment = mongoose.model('Comment', CommentSchema);
 
 // ============================================================
 // AUTH MIDDLEWARE (Улучшенная защита)
@@ -662,6 +674,37 @@ app.post('/api/friends/accept', authMiddleware, async (req, res) => {
   } catch(err) {
     console.error('Accept friend error', err);
     res.status(500).json({ error: 'Failed to accept friend' });
+  }
+});
+
+// ============================================================
+// API: COMMENTS
+// ============================================================
+app.get('/api/profile/:steamid/comments', async (req, res) => {
+  try {
+    const comments = await Comment.find({ targetSteamId: req.params.steamid }).sort({ createdAt: -1 });
+    res.json(comments);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch comments' });
+  }
+});
+
+app.post('/api/profile/:steamid/comments', authMiddleware, async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || !text.trim()) return res.status(400).json({ error: 'Empty comment' });
+
+    const newComment = new Comment({
+      targetSteamId: req.params.steamid,
+      authorSteamId: req.user.steamid,
+      authorName: req.user.name,
+      authorAvatar: req.user.avatar,
+      text: text.trim()
+    });
+    await newComment.save();
+    res.status(201).json(newComment);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to add comment' });
   }
 });
 
