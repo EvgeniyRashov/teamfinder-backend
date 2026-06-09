@@ -62,7 +62,6 @@ const UserSchema = new mongoose.Schema({
     friendly:   { type: Number, default: 0 },
     leader:     { type: Number, default: 0 }
   },
-  // ИСТОРИЯ ПОХВАЛ ДЛЯ ЗАЩИТЫ ОТ НАКРУТКИ 
   receivedLikes: [{
     from: String,
     commendType: String, 
@@ -109,7 +108,7 @@ const Notification = mongoose.model('Notification', NotifSchema);
 // ============================================================
 const LobbySchema = new mongoose.Schema({
   ownerId: { type: String, required: true },
-  members: [{ type: String }], // array of steamids
+  members: [{ type: String }], 
   gameMode: { type: String, default: 'Premier' },
   status: { type: String, default: 'waiting' }, 
 }, { timestamps: true });
@@ -386,7 +385,7 @@ app.post('/api/messages/send', authMiddleware, async (req, res) => {
 // Функция поиска подходящих игроков (запускается периодически или при запросах)
 async function tryMatchmaking() {
   const queue = await MatchQueue.find().sort({ enteredAt: 1 });
-  if (queue.length < 2) return; // Некого мэтчить
+  if (queue.length < 2) return; 
 
   const matchedIds = new Set();
 
@@ -397,8 +396,8 @@ async function tryMatchmaking() {
     const waitTimeSec = (Date.now() - new Date(p1.enteredAt).getTime()) / 1000;
     
     let range = 300;
-    if (waitTimeSec > 20) range = 600;
-    if (waitTimeSec > 40) range = 900;
+    if (waitTimeSec > 10) range = 600;
+    if (waitTimeSec > 20) range = 900;
 
     let currentLobby = [p1];
 
@@ -415,13 +414,11 @@ async function tryMatchmaking() {
     if (currentLobby.length > 1) {
       const members = currentLobby.map(p => p.steamid);
       
-      // Создаем лобби
       await Lobby.create({
         ownerId: members[0],
         members: members
       });
 
-      // Удаляем их из очереди
       await MatchQueue.deleteMany({ steamid: { $in: members } });
       members.forEach(id => matchedIds.add(id));
     }
@@ -461,7 +458,7 @@ app.get('/api/matchmaking/status', authMiddleware, async (req, res) => {
 
     const elapsed = Math.floor((Date.now() - new Date(q.enteredAt).getTime()) / 1000);
     
-    if (elapsed > 60) {
+    if (elapsed > 30) {
       await MatchQueue.deleteOne({ steamid: req.user.steamid });
       return res.json({ status: 'timeout' });
     }
@@ -676,7 +673,7 @@ app.post('/api/profile/:steamid/comments', authMiddleware, async (req, res) => {
 });
 
 // ============================================================
-// API: COMMENDS (ИСПРАВЛЕНА ОШИБКА 500)
+// API: COMMENDS 
 // ============================================================
 app.post('/api/commends/add', authMiddleware, async (req, res) => {
   try {
@@ -693,7 +690,6 @@ app.post('/api/commends/add', authMiddleware, async (req, res) => {
     const targetUser = await User.findOne({ steamid: targetSteamId });
     if (!targetUser) return res.status(404).json({ error: 'Игрок не найден' });
 
-    // ПРОВЕРКА 1: Был ли уже поставлен лайк в этой категории
     const alreadyLikedType = targetUser.receivedLikes && targetUser.receivedLikes.some(
       like => like.from === authorSteamId && like.commendType === type
     );
@@ -702,11 +698,9 @@ app.post('/api/commends/add', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Вы уже ставили лайк этому игроку в данной категории' });
     }
 
-    // Вычисляем новый Trust Score (максимум 100)
     let currentTrust = targetUser.trustScore || 50;
     let newTrust = Math.min(100, currentTrust + 1);
 
-    // БЕЗОПАСНОЕ АТОМАРНОЕ ОБНОВЛЕНИЕ БАЗЫ ДАННЫХ
     const incField = `commends.${type}`;
     await User.findOneAndUpdate(
       { steamid: targetSteamId },
@@ -716,7 +710,7 @@ app.post('/api/commends/add', authMiddleware, async (req, res) => {
         $push: { 
           receivedLikes: {
             from: authorSteamId,
-            commendType: type, // ИСПОЛЬЗУЕМ БЕЗОПАСНОЕ НАЗВАНИЕ ПОЛЯ
+            commendType: type,
             date: new Date()
           }
         }
@@ -732,7 +726,7 @@ app.post('/api/commends/add', authMiddleware, async (req, res) => {
 });
 
 // ============================================================
-// API: REPORTS (УВЕЛИЧЕННЫЙ ШТРАФ)
+// API: REPORTS 
 // ============================================================
 app.post('/api/reports/add', authMiddleware, async (req, res) => {
   try {
@@ -754,7 +748,6 @@ app.post('/api/reports/add', authMiddleware, async (req, res) => {
       details
     });
 
-    // Репорт отнимает сразу -3 к Trust Score
     await User.findOneAndUpdate(
       { steamid: targetSteamId }, 
       { $inc: { trustScore: -3 } }
