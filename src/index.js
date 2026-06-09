@@ -62,6 +62,12 @@ const UserSchema = new mongoose.Schema({
     friendly:   { type: Number, default: 0 },
     leader:     { type: Number, default: 0 }
   },
+  // ИСТОРИЯ ПОХВАЛ ДЛЯ ЗАЩИТЫ ОТ НАКРУТКИ
+  receivedLikes: [{
+    from: String,
+    type: String, // 'teamPlayer', 'friendly', 'leader'
+    date: Date
+  }],
   hasMic:          { type: Boolean, default: false },
   isLookingForTeam:{ type: Boolean, default: false },
   isOnline:        { type: Boolean, default: false },
@@ -134,7 +140,7 @@ const ReportSchema = new mongoose.Schema({
 const Report = mongoose.model('Report', ReportSchema);
 
 // ============================================================
-// COMMEND SCHEMA (Likes)
+// COMMEND SCHEMA (Likes) - Оставляем как резерв
 // ============================================================
 const CommendSchema = new mongoose.Schema({
   targetSteamId: { type: String, required: true },
@@ -360,7 +366,6 @@ app.post('/api/messages/send', authMiddleware, async (req, res) => {
   try {
     const { targetId, text } = req.body;
     
-    // ДОБАВЛЕНА ПРОВЕРКА
     if (!targetId || targetId === 'undefined' || targetId === 'null') {
       return res.status(400).json({ error: 'Некорректный ID получателя' });
     }
@@ -414,7 +419,6 @@ app.post('/api/lobby/invite', authMiddleware, async (req, res) => {
   try {
     const { targetId } = req.body;
     
-    // ДОБАВЛЕНА ПРОВЕРКА
     if (!targetId || targetId === 'undefined' || targetId === 'null') {
       return res.status(400).json({ error: 'Некорректный ID пользователя' });
     }
@@ -493,47 +497,67 @@ app.post('/api/lobby/leave', authMiddleware, async (req, res) => {
 });
 
 // ============================================================
-// API: COMMENDS (Likes)
+// API: COMMENDS (НОВАЯ ЗАЩИТА ОТ НАКРУТКИ)
 // ============================================================
 app.post('/api/commends/add', authMiddleware, async (req, res) => {
   try {
     const { targetSteamId, type } = req.body;
+    const authorSteamId = req.user.steamid;
 
-    // ДОБАВЛЕНА ПРОВЕРКА
     if (!targetSteamId || targetSteamId === 'undefined' || targetSteamId === 'null') {
       return res.status(400).json({ error: 'Некорректный ID пользователя' });
     }
 
-    if (targetSteamId === req.user.steamid) return res.status(400).json({ error: 'Нельзя лайкать себя' });
-    if (!['teamPlayer', 'friendly', 'leader'].includes(type)) return res.status(400).json({ error: 'Invalid type' });
+    if (targetSteamId === authorSteamId) return res.status(400).json({ error: 'Нельзя лайкать себя' });
+    if (!['teamPlayer', 'friendly', 'leader'].includes(type)) return res.status(400).json({ error: 'Неверный тип лайка' });
 
-    // Check if already commended
-    const existing = await Commend.findOne({ targetSteamId, authorSteamId: req.user.steamid, type });
-    if (existing) return res.status(400).json({ error: 'Вы уже ставили этот лайк данному игроку' });
+    const targetUser = await User.findOne({ steamid: targetSteamId });
+    if (!targetUser) return res.status(404).json({ error: 'Игрок не найден' });
 
-    await Commend.create({ targetSteamId, authorSteamId: req.user.steamid, type });
+    // Убедимся, что массив для хранения истории лайков существует
+    if (!targetUser.receivedLikes) targetUser.receivedLikes = [];
 
-    const incField = `commends.${type}`;
-    await User.findOneAndUpdate(
-      { steamid: targetSteamId }, 
-      { $inc: { [incField]: 1, trustScore: 2 } }
+    // ПРОВЕРКА 1: Ставил ли автор уже лайк в эту категорию? (по одному лайку в каждую категорию)
+    const alreadyLikedType = targetUser.receivedLikes.some(
+      like => like.from === authorSteamId && like.type === type
     );
 
-    res.json({ ok: true });
-  } catch(err) {
-    if (err.code === 11000) return res.status(400).json({ error: 'Вы уже ставили этот лайк' });
-    res.status(500).json({ error: 'Ошибка сервера' });
+    if (alreadyLikedType) {
+      return res.status(400).json({ error: 'Вы уже ставили лайк этому игроку в данной категории' });
+    }
+
+    // Записываем лайк в историю
+    targetUser.receivedLikes.push({
+      from: authorSteamId,
+      type: type,
+      date: new Date()
+    });
+
+    // Увеличиваем счетчики
+    if (!targetUser.commends) targetUser.commends = { teamPlayer: 0, friendly: 0, leader: 0 };
+    targetUser.commends[type] += 1;
+
+    // Формула: +1 к Trust Score за каждый уникальный лайк
+    let currentTrust = targetUser.trustScore || targetUser.trust || 50;
+    targetUser.trustScore = Math.min(100, currentTrust + 1);
+
+    await targetUser.save();
+
+    res.json({ success: true, newTrust: targetUser.trustScore });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
   }
 });
 
 // ============================================================
-// API: REPORTS
+// API: REPORTS (УВЕЛИЧЕННЫЙ ШТРАФ ЗА РЕПОРТ)
 // ============================================================
 app.post('/api/reports/add', authMiddleware, async (req, res) => {
   try {
     const { targetSteamId, reason, details } = req.body;
 
-    // ДОБАВЛЕНА ПРОВЕРКА
     if (!targetSteamId || targetSteamId === 'undefined' || targetSteamId === 'null') {
       return res.status(400).json({ error: 'Некорректный ID пользователя' });
     }
@@ -550,7 +574,11 @@ app.post('/api/reports/add', authMiddleware, async (req, res) => {
       details
     });
 
-    await User.findOneAndUpdate({ steamid: targetSteamId }, { $inc: { trustScore: -1 } });
+    // Формула: Репорт отнимает сразу -3 к Trust Score
+    await User.findOneAndUpdate(
+      { steamid: targetSteamId }, 
+      { $inc: { trustScore: -3 } }
+    );
 
     res.json({ ok: true });
   } catch(err) {
@@ -567,7 +595,6 @@ app.get('/api/friends', authMiddleware, async (req, res) => {
     const user = await User.findOne({ steamid: req.user.steamid }).select('friends');
     if (!user || !user.friends) return res.json([]);
     
-    // Можно подтянуть актуальные статусы онлайна для друзей
     const friendIds = user.friends.map(f => f.steamid);
     const updatedFriends = await User.find({ steamid: { $in: friendIds } })
       .select('steamid name avatar nick isOnline');
@@ -582,7 +609,6 @@ app.post('/api/friends/add', authMiddleware, async (req, res) => {
   try {
     const { targetSteamId } = req.body;
     
-    // ДОБАВЛЕНА ПРОВЕРКА
     if (!targetSteamId || targetSteamId === 'undefined' || targetSteamId === 'null') {
       return res.status(400).json({ error: 'Некорректный ID пользователя' });
     }
@@ -714,7 +740,6 @@ app.post('/api/profile/:steamid/comments', authMiddleware, async (req, res) => {
 app.get('/api/profile/:steamid', async (req, res) => {
   const { steamid } = req.params;
   
-  // ДОБАВЛЕНА ПРОВЕРКА: Если steamid сломан, не стучимся в Steam API
   if (!steamid || steamid === 'undefined' || steamid === 'null') {
     return res.status(400).json({ error: 'Invalid steamid' });
   }
