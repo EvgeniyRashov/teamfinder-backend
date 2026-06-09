@@ -28,7 +28,6 @@ app.use(cors({
 app.use(cookieParser());
 app.use(express.json());
 
-// Healthcheck
 app.get('/', (req, res) => res.send('TEAMFINDER Backend is running!'));
 
 if (!process.env.MONGODB_URI) {
@@ -40,9 +39,6 @@ mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected'))
   .catch(err => console.error('MongoDB error', err));
 
-// ============================================================
-// SCHEMA
-// ============================================================
 const UserSchema = new mongoose.Schema({
   steamid:         { type: String, unique: true, required: true },
   name:            String,
@@ -86,9 +82,6 @@ const UserSchema = new mongoose.Schema({
 
 const User = mongoose.model('User', UserSchema);
 
-// ============================================================
-// NOTIFICATIONS SCHEMA
-// ============================================================
 const NotifSchema = new mongoose.Schema({
   userId: { type: String, required: true },
   type: String, 
@@ -103,9 +96,6 @@ const NotifSchema = new mongoose.Schema({
 });
 const Notification = mongoose.model('Notification', NotifSchema);
 
-// ============================================================
-// LOBBY SCHEMA
-// ============================================================
 const LobbySchema = new mongoose.Schema({
   ownerId: { type: String, required: true },
   members: [{ type: String }], 
@@ -114,9 +104,6 @@ const LobbySchema = new mongoose.Schema({
 }, { timestamps: true });
 const Lobby = mongoose.model('Lobby', LobbySchema);
 
-// ============================================================
-// MESSAGE SCHEMA
-// ============================================================
 const MessageSchema = new mongoose.Schema({
   senderId: { type: String, required: true },
   receiverId: { type: String, required: true },
@@ -125,9 +112,6 @@ const MessageSchema = new mongoose.Schema({
 }, { timestamps: true });
 const Message = mongoose.model('Message', MessageSchema);
 
-// ============================================================
-// REPORT SCHEMA
-// ============================================================
 const ReportSchema = new mongoose.Schema({
   targetSteamId: { type: String, required: true },
   authorSteamId: { type: String, required: true },
@@ -138,9 +122,6 @@ const ReportSchema = new mongoose.Schema({
 });
 const Report = mongoose.model('Report', ReportSchema);
 
-// ============================================================
-// COMMENT SCHEMA
-// ============================================================
 const CommentSchema = new mongoose.Schema({
   targetSteamId: { type: String, required: true },
   authorSteamId: { type: String, required: true },
@@ -151,19 +132,16 @@ const CommentSchema = new mongoose.Schema({
 });
 const Comment = mongoose.model('Comment', CommentSchema);
 
-// ============================================================
-// MATCHMAKING QUEUE SCHEMA
-// ============================================================
 const MatchQueueSchema = new mongoose.Schema({
   steamid: { type: String, required: true, unique: true },
   elo: { type: Number, default: 0 },
+  faceit: { type: Number, default: 0 },
+  mmrank: { type: String, default: '' },
+  mode: { type: String, default: 'Premier' },
   enteredAt: { type: Date, default: Date.now }
 });
 const MatchQueue = mongoose.model('MatchQueue', MatchQueueSchema);
 
-// ============================================================
-// AUTH MIDDLEWARE
-// ============================================================
 const authMiddleware = (req, res, next) => {
   const auth  = req.headers.authorization;
   const token = auth?.startsWith('Bearer ') ? auth.slice(7) : req.cookies?.tf_token;
@@ -183,9 +161,6 @@ const STEAM_OPENID = 'https://steamcommunity.com/openid/login';
 const RETURN_URL   = process.env.STEAM_RETURN_URL;
 const REALM        = process.env.STEAM_REALM;
 
-// ============================================================
-// STEAM AUTH
-// ============================================================
 app.get('/auth/steam', (req, res) => {
   const params = querystring.stringify({
     'openid.ns':         'http://specs.openid.net/auth/2.0',
@@ -249,9 +224,6 @@ app.post('/auth/logout', authMiddleware, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ============================================================
-// API: ME & SETTINGS
-// ============================================================
 app.get('/api/me', authMiddleware, async (req, res) => {
   const user = await User.findOne({ steamid: req.user.steamid });
   res.json({ user });
@@ -279,9 +251,6 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
   }
 });
 
-// ============================================================
-// API: PLAYERS
-// ============================================================
 app.get('/api/players', async (req, res) => {
   try {
     const { role, region, language, minTrust, minElo, minFaceit, mmrank, hasMic, limit = 50 } = req.query;
@@ -309,9 +278,6 @@ app.get('/api/players', async (req, res) => {
   }
 });
 
-// ============================================================
-// API: NOTIFICATIONS & MESSAGES
-// ============================================================
 app.get('/api/notifications', authMiddleware, async (req, res) => {
   try {
     const notifs = await Notification.find({ userId: req.user.steamid }).sort({ time: -1 });
@@ -378,11 +344,6 @@ app.post('/api/messages/send', authMiddleware, async (req, res) => {
   }
 });
 
-// ============================================================
-// API: MATCHMAKING 
-// ============================================================
-
-// Функция поиска подходящих игроков (запускается периодически или при запросах)
 async function tryMatchmaking() {
   const queue = await MatchQueue.find().sort({ enteredAt: 1 });
   if (queue.length < 2) return; 
@@ -395,9 +356,12 @@ async function tryMatchmaking() {
     const p1 = queue[i];
     const waitTimeSec = (Date.now() - new Date(p1.enteredAt).getTime()) / 1000;
     
-    let range = 300;
-    if (waitTimeSec > 10) range = 600;
-    if (waitTimeSec > 20) range = 900;
+    let eloRange = 300;
+    let faceitRange = 1;
+    let rankFlexible = false;
+
+    if (waitTimeSec > 10) { eloRange = 600; faceitRange = 2; }
+    if (waitTimeSec > 20) { eloRange = 900; faceitRange = 4; rankFlexible = true; }
 
     let currentLobby = [p1];
 
@@ -405,7 +369,19 @@ async function tryMatchmaking() {
       if (matchedIds.has(queue[j].steamid)) continue;
       const p2 = queue[j];
 
-      if (Math.abs(p1.elo - p2.elo) <= range) {
+      if (p1.mode !== p2.mode) continue;
+
+      let isMatch = false;
+
+      if (p1.mode === 'FACEIT' && p1.faceit > 0 && p2.faceit > 0) {
+        if (Math.abs(p1.faceit - p2.faceit) <= faceitRange) isMatch = true;
+      } else if (p1.mode === 'Competitive' && p1.mmrank && p2.mmrank) {
+        if (p1.mmrank === p2.mmrank || rankFlexible) isMatch = true;
+      } else {
+        if (Math.abs(p1.elo - p2.elo) <= eloRange) isMatch = true;
+      }
+
+      if (isMatch) {
         currentLobby.push(p2);
         if (currentLobby.length === 5) break;
       }
@@ -416,7 +392,8 @@ async function tryMatchmaking() {
       
       await Lobby.create({
         ownerId: members[0],
-        members: members
+        members: members,
+        gameMode: p1.mode
       });
 
       await MatchQueue.deleteMany({ steamid: { $in: members } });
@@ -433,10 +410,18 @@ app.post('/api/matchmaking/start', authMiddleware, async (req, res) => {
     }
 
     const me = await User.findOne({ steamid: req.user.steamid });
+    const requestedMode = req.body.mode || me?.mode || 'Premier';
     
     await MatchQueue.findOneAndUpdate(
       { steamid: req.user.steamid },
-      { steamid: req.user.steamid, elo: me?.elo || 0, enteredAt: new Date() },
+      { 
+        steamid: req.user.steamid, 
+        elo: me?.elo || 0, 
+        faceit: me?.faceit || 0,
+        mmrank: me?.mmrank || '',
+        mode: requestedMode,
+        enteredAt: new Date() 
+      },
       { upsert: true }
     );
 
@@ -480,9 +465,6 @@ app.post('/api/matchmaking/cancel', authMiddleware, async (req, res) => {
   }
 });
 
-// ============================================================
-// API: LOBBY
-// ============================================================
 app.get('/api/lobby/me', authMiddleware, async (req, res) => {
   try {
     const lobby = await Lobby.findOne({ members: req.user.steamid });
@@ -558,9 +540,6 @@ app.post('/api/lobby/leave', authMiddleware, async (req, res) => {
   }
 });
 
-// ============================================================
-// API: FRIENDS
-// ============================================================
 app.get('/api/friends', authMiddleware, async (req, res) => {
   try {
     const user = await User.findOne({ steamid: req.user.steamid }).select('friends');
@@ -641,9 +620,6 @@ app.post('/api/friends/accept', authMiddleware, async (req, res) => {
   }
 });
 
-// ============================================================
-// API: COMMENTS
-// ============================================================
 app.get('/api/profile/:steamid/comments', async (req, res) => {
   try {
     const comments = await Comment.find({ targetSteamId: req.params.steamid }).sort({ createdAt: -1 });
@@ -672,9 +648,6 @@ app.post('/api/profile/:steamid/comments', authMiddleware, async (req, res) => {
   }
 });
 
-// ============================================================
-// API: COMMENDS 
-// ============================================================
 app.post('/api/commends/add', authMiddleware, async (req, res) => {
   try {
     const { targetSteamId, type } = req.body;
@@ -725,9 +698,6 @@ app.post('/api/commends/add', authMiddleware, async (req, res) => {
   }
 });
 
-// ============================================================
-// API: REPORTS 
-// ============================================================
 app.post('/api/reports/add', authMiddleware, async (req, res) => {
   try {
     const { targetSteamId, reason, details } = req.body;
@@ -760,9 +730,6 @@ app.post('/api/reports/add', authMiddleware, async (req, res) => {
   }
 });
 
-// ============================================================
-// API: PROFILE
-// ============================================================
 app.get('/api/profile/:steamid', async (req, res) => {
   const { steamid } = req.params;
   
