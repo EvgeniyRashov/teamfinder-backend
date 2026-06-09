@@ -62,11 +62,11 @@ const UserSchema = new mongoose.Schema({
     friendly:   { type: Number, default: 0 },
     leader:     { type: Number, default: 0 }
   },
-  // ИСТОРИЯ ПОХВАЛ ДЛЯ ЗАЩИТЫ ОТ НАКРУТКИ
+  // ИСТОРИЯ ПОХВАЛ ДЛЯ ЗАЩИТЫ ОТ НАКРУТКИ (ИСПРАВЛЕНО)
   receivedLikes: [{
     from: String,
-    type: String, // 'teamPlayer', 'friendly', 'leader'
-    date: Date
+    commendType: String, // Переименовано, чтобы Mongoose не ругался на 'type'
+    date: { type: Date, default: Date.now }
   }],
   hasMic:          { type: Boolean, default: false },
   isLookingForTeam:{ type: Boolean, default: false },
@@ -562,7 +562,7 @@ app.post('/api/profile/:steamid/comments', authMiddleware, async (req, res) => {
 });
 
 // ============================================================
-// API: COMMENDS (НАДЕЖНОЕ АТОМАРНОЕ ОБНОВЛЕНИЕ БЕЗ ОШИБКИ 500)
+// API: COMMENDS (ИСПРАВЛЕНА ОШИБКА 500)
 // ============================================================
 app.post('/api/commends/add', authMiddleware, async (req, res) => {
   try {
@@ -581,7 +581,7 @@ app.post('/api/commends/add', authMiddleware, async (req, res) => {
 
     // ПРОВЕРКА 1: Был ли уже поставлен лайк в этой категории
     const alreadyLikedType = targetUser.receivedLikes && targetUser.receivedLikes.some(
-      like => like.from === authorSteamId && like.type === type
+      like => like.from === authorSteamId && like.commendType === type
     );
 
     if (alreadyLikedType) {
@@ -602,7 +602,7 @@ app.post('/api/commends/add', authMiddleware, async (req, res) => {
         $push: { 
           receivedLikes: {
             from: authorSteamId,
-            type: type,
+            commendType: type, // ИСПОЛЬЗУЕМ БЕЗОПАСНОЕ НАЗВАНИЕ ПОЛЯ
             date: new Date()
           }
         }
