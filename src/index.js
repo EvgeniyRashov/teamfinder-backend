@@ -56,16 +56,16 @@ const UserSchema = new mongoose.Schema({
   mode:            { type: String, default: 'Premier' },
   region:          { type: String, default: 'any' },
   language:        { type: String, default: 'ru' },
-  trustScore:      { type: Number, default: 50 }, // Базовый траст 50
+  trustScore:      { type: Number, default: 50 }, 
   commends: {
     teamPlayer: { type: Number, default: 0 },
     friendly:   { type: Number, default: 0 },
     leader:     { type: Number, default: 0 }
   },
-  // ИСТОРИЯ ПОХВАЛ ДЛЯ ЗАЩИТЫ ОТ НАКРУТКИ (ИСПРАВЛЕНО)
+  // ИСТОРИЯ ПОХВАЛ ДЛЯ ЗАЩИТЫ ОТ НАКРУТКИ 
   receivedLikes: [{
     from: String,
-    commendType: String, // Переименовано, чтобы Mongoose не ругался на 'type'
+    commendType: String, 
     date: { type: Date, default: Date.now }
   }],
   hasMic:          { type: Boolean, default: false },
@@ -92,7 +92,7 @@ const User = mongoose.model('User', UserSchema);
 // ============================================================
 const NotifSchema = new mongoose.Schema({
   userId: { type: String, required: true },
-  type: String, // 'invites', 'friends', 'system', 'message'
+  type: String, 
   icon: String,
   ic: String,
   title: String,
@@ -111,7 +111,7 @@ const LobbySchema = new mongoose.Schema({
   ownerId: { type: String, required: true },
   members: [{ type: String }], // array of steamids
   gameMode: { type: String, default: 'Premier' },
-  status: { type: String, default: 'waiting' }, // waiting, in_game
+  status: { type: String, default: 'waiting' }, 
 }, { timestamps: true });
 const Lobby = mongoose.model('Lobby', LobbySchema);
 
@@ -151,6 +151,16 @@ const CommentSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 const Comment = mongoose.model('Comment', CommentSchema);
+
+// ============================================================
+// MATCHMAKING QUEUE SCHEMA
+// ============================================================
+const MatchQueueSchema = new mongoose.Schema({
+  steamid: { type: String, required: true, unique: true },
+  elo: { type: Number, default: 0 },
+  enteredAt: { type: Date, default: Date.now }
+});
+const MatchQueue = mongoose.model('MatchQueue', MatchQueueSchema);
 
 // ============================================================
 // AUTH MIDDLEWARE
@@ -366,6 +376,110 @@ app.post('/api/messages/send', authMiddleware, async (req, res) => {
     res.json({ ok: true, message: msg });
   } catch(err) {
     res.status(500).json({ error: 'Failed to send message' });
+  }
+});
+
+// ============================================================
+// API: MATCHMAKING 
+// ============================================================
+
+// Функция поиска подходящих игроков (запускается периодически или при запросах)
+async function tryMatchmaking() {
+  const queue = await MatchQueue.find().sort({ enteredAt: 1 });
+  if (queue.length < 2) return; // Некого мэтчить
+
+  const matchedIds = new Set();
+
+  for (let i = 0; i < queue.length; i++) {
+    if (matchedIds.has(queue[i].steamid)) continue;
+
+    const p1 = queue[i];
+    const waitTimeSec = (Date.now() - new Date(p1.enteredAt).getTime()) / 1000;
+    
+    let range = 300;
+    if (waitTimeSec > 20) range = 600;
+    if (waitTimeSec > 40) range = 900;
+
+    let currentLobby = [p1];
+
+    for (let j = i + 1; j < queue.length; j++) {
+      if (matchedIds.has(queue[j].steamid)) continue;
+      const p2 = queue[j];
+
+      if (Math.abs(p1.elo - p2.elo) <= range) {
+        currentLobby.push(p2);
+        if (currentLobby.length === 5) break;
+      }
+    }
+
+    if (currentLobby.length > 1) {
+      const members = currentLobby.map(p => p.steamid);
+      
+      // Создаем лобби
+      await Lobby.create({
+        ownerId: members[0],
+        members: members
+      });
+
+      // Удаляем их из очереди
+      await MatchQueue.deleteMany({ steamid: { $in: members } });
+      members.forEach(id => matchedIds.add(id));
+    }
+  }
+}
+
+app.post('/api/matchmaking/start', authMiddleware, async (req, res) => {
+  try {
+    const existingLobby = await Lobby.findOne({ members: req.user.steamid });
+    if (existingLobby) {
+       return res.json({ status: 'found' });
+    }
+
+    const me = await User.findOne({ steamid: req.user.steamid });
+    
+    await MatchQueue.findOneAndUpdate(
+      { steamid: req.user.steamid },
+      { steamid: req.user.steamid, elo: me?.elo || 0, enteredAt: new Date() },
+      { upsert: true }
+    );
+
+    await tryMatchmaking();
+
+    res.json({ status: 'searching' });
+  } catch(e) {
+    res.status(500).json({ error: 'Matchmaking err' });
+  }
+});
+
+app.get('/api/matchmaking/status', authMiddleware, async (req, res) => {
+  try {
+    const lobby = await Lobby.findOne({ members: req.user.steamid });
+    if (lobby) return res.json({ status: 'found' });
+
+    const q = await MatchQueue.findOne({ steamid: req.user.steamid });
+    if (!q) return res.json({ status: 'none' });
+
+    const elapsed = Math.floor((Date.now() - new Date(q.enteredAt).getTime()) / 1000);
+    
+    if (elapsed > 60) {
+      await MatchQueue.deleteOne({ steamid: req.user.steamid });
+      return res.json({ status: 'timeout' });
+    }
+
+    await tryMatchmaking();
+    res.json({ status: 'searching', elapsed });
+
+  } catch(e) {
+    res.status(500).json({ error: 'Status err' });
+  }
+});
+
+app.post('/api/matchmaking/cancel', authMiddleware, async (req, res) => {
+  try {
+    await MatchQueue.deleteOne({ steamid: req.user.steamid });
+    res.json({ ok: true });
+  } catch(e) {
+    res.status(500).json({ error: 'Cancel err' });
   }
 });
 
