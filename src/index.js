@@ -1,35 +1,47 @@
 require('dotenv').config();
 
-const express    = require('express');
-const cors       = require('cors');
+const express      = require('express');
+const cors         = require('cors');
 const cookieParser = require('cookie-parser');
-const jwt        = require('jsonwebtoken');
-const https      = require('https');
-const querystring = require('querystring');
-const mongoose   = require('mongoose');
+const jwt          = require('jsonwebtoken');
+const https        = require('https');
+const querystring  = require('querystring');
+const mongoose     = require('mongoose');
 
 const app = express();
 app.set('trust proxy', 1);
 
-const allowedOrigins = ['https://teamfinder-pwa.vercel.app', 'http://localhost:3000', 'http://127.0.0.1:5500', 'http://localhost:5000'];
+// ===== НАДЁЖНЫЕ НАСТРОЙКИ CORS =====
+const allowedOrigins = [
+  'https://teamfinder-pwa.vercel.app', 
+  'http://localhost:3000', 
+  'http://127.0.0.1:5500', 
+  'http://localhost:5000'
+];
+
 app.use(cors({
   origin: function(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) !== -1 || origin.endsWith('.vercel.app')) {
       callback(null, true);
     } else {
-      callback(null, true); 
+      callback(null, true); // Временно пропускаем все, чтобы избежать блокировок
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+  allowedHeaders: 'Content-Type, Authorization, X-Requested-With, Accept'
 }));
+
+// Обязательный ответ на preflight-запросы (OPTIONS) для всех маршрутов
+app.options('*', cors());
 
 app.use(cookieParser());
 app.use(express.json());
 
 app.get('/', (req, res) => res.send('TEAMFINDER Backend is running!'));
 
+// ===== ПОДКЛЮЧЕНИЕ К MONGODB =====
 if (!process.env.MONGODB_URI) {
   console.error("FATAL ERROR: MONGODB_URI is not defined.");
   process.exit(1);
@@ -39,6 +51,7 @@ mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected'))
   .catch(err => console.error('MongoDB error', err));
 
+// ===== СХЕМЫ БАЗЫ ДАННЫХ =====
 const UserSchema = new mongoose.Schema({
   steamid:         { type: String, unique: true, required: true },
   name:            String,
@@ -141,6 +154,7 @@ const MatchQueueSchema = new mongoose.Schema({
 });
 const MatchQueue = mongoose.model('MatchQueue', MatchQueueSchema);
 
+// ===== MIDDLEWARE ДЛЯ АВТОРИЗАЦИИ =====
 const authMiddleware = (req, res, next) => {
   const auth  = req.headers.authorization;
   const token = auth?.startsWith('Bearer ') ? auth.slice(7) : req.cookies?.tf_token;
@@ -154,6 +168,7 @@ const authMiddleware = (req, res, next) => {
   }
 };
 
+// ===== STEAM АВТОРИЗАЦИЯ =====
 const STEAM_OPENID = 'https://steamcommunity.com/openid/login';
 const RETURN_URL   = process.env.STEAM_RETURN_URL;
 const REALM        = process.env.STEAM_REALM;
@@ -217,6 +232,7 @@ app.post('/auth/logout', authMiddleware, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ===== ПРОФИЛЬ, ИГРОКИ, НАСТРОЙКИ =====
 app.get('/api/me', authMiddleware, async (req, res) => {
   const user = await User.findOne({ steamid: req.user.steamid });
   res.json({ user });
@@ -267,6 +283,7 @@ app.get('/api/players', async (req, res) => {
   }
 });
 
+// ===== УВЕДОМЛЕНИЯ И СООБЩЕНИЯ =====
 app.get('/api/notifications', authMiddleware, async (req, res) => {
   try {
     const notifs = await Notification.find({ userId: req.user.steamid }).sort({ time: -1 });
@@ -316,6 +333,7 @@ app.post('/api/messages/send', authMiddleware, async (req, res) => {
   }
 });
 
+// ===== МАТЧМЕЙКИНГ =====
 async function tryMatchmaking() {
   const queue = await MatchQueue.find().sort({ enteredAt: 1 });
   if (queue.length < 2) return; 
@@ -405,6 +423,7 @@ app.post('/api/matchmaking/cancel', authMiddleware, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ===== ЛОББИ =====
 app.get('/api/lobby/me', authMiddleware, async (req, res) => {
   try {
     const lobby = await Lobby.findOne({ members: req.user.steamid });
@@ -416,7 +435,7 @@ app.get('/api/lobby/me', authMiddleware, async (req, res) => {
   }
 });
 
-// НОВЫЙ РОУТ ДЛЯ МГНОВЕННОГО ДОБАВЛЕНИЯ В ЛОББИ
+// МГНОВЕННОЕ ДОБАВЛЕНИЕ В ЛОББИ
 app.post('/api/lobby/add-member', authMiddleware, async (req, res) => {
   try {
     const { targetId } = req.body;
@@ -500,6 +519,7 @@ app.post('/api/lobby/leave', authMiddleware, async (req, res) => {
   }
 });
 
+// ===== ДРУЗЬЯ, ОТЗЫВЫ И РЕПОРТЫ =====
 app.get('/api/friends', authMiddleware, async (req, res) => {
   const user = await User.findOne({ steamid: req.user.steamid }).select('friends');
   if (!user || !user.friends) return res.json([]);
@@ -664,5 +684,6 @@ app.get('/api/profile/:steamid', async (req, res) => {
   }
 });
 
+// ===== ЗАПУСК СЕРВЕРА =====
 const port = process.env.PORT || 5000;
 app.listen(port, () => console.log(`TEAMFINDER backend listening on ${port}`));
