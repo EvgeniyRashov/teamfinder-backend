@@ -25,7 +25,7 @@ app.use(cors({
     if (allowedOrigins.indexOf(origin) !== -1 || origin.endsWith('.vercel.app')) {
       callback(null, true);
     } else {
-      callback(null, true); // Временно пропускаем все, чтобы избежать блокировок
+      callback(null, true); 
     }
   },
   credentials: true,
@@ -33,7 +33,7 @@ app.use(cors({
   allowedHeaders: 'Content-Type, Authorization, X-Requested-With, Accept'
 }));
 
-// Обязательный ответ на preflight-запросы (OPTIONS) для всех маршрутов
+// Обязательный ответ на preflight-запросы (OPTIONS)
 app.options('*', cors());
 
 app.use(cookieParser());
@@ -526,7 +526,7 @@ app.get('/api/friends', authMiddleware, async (req, res) => {
   res.json(updatedFriends);
 });
 
-// РОУТЫ КОММЕНТАРИЕВ ДЛЯ ПРОФИЛЯ
+// КОММЕНТАРИИ ДЛЯ ПРОФИЛЯ
 app.get('/api/profile/:steamid/comments', async (req, res) => {
   try {
     const comments = await Comment.find({ targetSteamId: req.params.steamid })
@@ -543,16 +543,17 @@ app.post('/api/profile/:steamid/comments', authMiddleware, async (req, res) => {
     if (!text) return res.status(400).json({ error: 'Empty comment' });
 
     const newComment = new Comment({
-      targetSteamId: req.params.steamid, 
+      targetSteamId: req.params.steamid,
       authorSteamId: req.user.steamid,
-      authorName: req.user.name, 
-      authorAvatar: req.user.avatar, 
+      authorName: req.user.name,
+      authorAvatar: req.user.avatar,
       text
     });
+
     await newComment.save();
     res.status(201).json(newComment);
-  } catch (err) { 
-    res.status(500).json({ error: 'Failed to add comment' }); 
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to add comment' });
   }
 });
 
@@ -679,24 +680,66 @@ app.post('/api/friends/accept', authMiddleware, async (req, res) => {
   }
 });
 
+// ПРОФИЛЬ СО СТАТИСТИКОЙ СТИМА
 app.get('/api/profile/:steamid', async (req, res) => {
   const { steamid } = req.params;
   const key = process.env.STEAM_API_KEY;
   try {
-    const [summaryRes, statsRes] = await Promise.allSettled([
+    const [summaryRes, statsRes, hoursRes] = await Promise.allSettled([
       fetch(`https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${key}&steamids=${steamid}`),
-      fetch(`https://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v2/?key=${key}&steamid=${steamid}&appid=730`)
+      fetch(`https://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v2/?key=${key}&steamid=${steamid}&appid=730`),
+      fetch(`https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${key}&steamid=${steamid}&appids_filter[0]=730&include_appinfo=false`)
     ]);
 
     let profile = null;
     if (summaryRes.status === 'fulfilled' && summaryRes.value.ok) {
       const data = await summaryRes.value.json();
       const p = data.response?.players?.[0];
-      if (p) profile = { steamid: p.steamid, name: p.personaname, avatar: p.avatarfull, profileUrl: p.profileurl, status: p.personastate === 1 ? 'online' : 'offline' };
+      if (p) {
+        profile = { 
+          steamid: p.steamid, 
+          name: p.personaname, 
+          avatar: p.avatarfull, 
+          profileUrl: p.profileurl, 
+          status: p.personastate === 1 ? 'online' : 'offline',
+          country: p.loccountrycode || null,
+          createdAt: p.timecreated ? new Date(p.timecreated * 1000).getFullYear() : null
+        };
+      }
     }
+
+    let stats = null;
+    if (statsRes.status === 'fulfilled' && statsRes.value.ok) {
+      const data = await statsRes.value.json();
+      if (data.playerstats && data.playerstats.stats) {
+        const raw = data.playerstats.stats;
+        const getStat = (name) => raw.find(s => s.name === name)?.value || 0;
+        const kills = getStat('total_kills'), deaths = getStat('total_deaths'), wins = getStat('total_wins');
+        const roundsPlayed = getStat('total_rounds_played'), headshotKills = getStat('total_kills_headshot');
+        const shots = getStat('total_shots_fired'), hits = getStat('total_shots_hit');
+        stats = {
+          kills, deaths,
+          kd: deaths > 0 ? (kills / deaths).toFixed(2) : kills.toFixed(2),
+          wins, roundsPlayed,
+          winRate: roundsPlayed > 0 ? ((wins / roundsPlayed) * 100).toFixed(1) : '0',
+          hsRate: kills > 0 ? ((headshotKills / kills) * 100).toFixed(1) : '0',
+          mvps: getStat('total_mvps'),
+          accuracy: shots > 0 ? ((hits / shots) * 100).toFixed(1) : '0',
+        };
+      }
+    }
+
+    let hoursCs2 = null;
+    if (hoursRes.status === 'fulfilled' && hoursRes.value.ok) {
+      const data = await hoursRes.value.json();
+      const game = data.response?.games?.[0];
+      if (game) hoursCs2 = Math.round(game.playtime_forever / 60);
+    }
+
     const dbUser = await User.findOne({ steamid }).select('elo faceit mmrank role mode region nick bio trustScore friends commends');
     const reports = await Report.find({ targetSteamId: steamid }).sort({ createdAt: -1 }).limit(10);
-    return res.json({ profile, stats: null, gameData: dbUser || null, friends: dbUser?.friends || [], reports });
+    
+    return res.json({ profile, stats, hoursCs2, gameData: dbUser || null, friends: dbUser?.friends || [], reports });
   } catch(err) {
     return res.status(500).json({ error: 'Failed to fetch profile' });
   }
