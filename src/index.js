@@ -435,7 +435,6 @@ app.get('/api/lobby/me', authMiddleware, async (req, res) => {
   }
 });
 
-// МГНОВЕННОЕ ДОБАВЛЕНИЕ В ЛОББИ
 app.post('/api/lobby/add-member', authMiddleware, async (req, res) => {
   try {
     const { targetId } = req.body;
@@ -527,15 +526,34 @@ app.get('/api/friends', authMiddleware, async (req, res) => {
   res.json(updatedFriends);
 });
 
+// РОУТЫ КОММЕНТАРИЕВ ДЛЯ ПРОФИЛЯ
+app.get('/api/profile/:steamid/comments', async (req, res) => {
+  try {
+    const comments = await Comment.find({ targetSteamId: req.params.steamid })
+      .sort({ createdAt: -1 });
+    res.json(comments);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch comments' });
+  }
+});
+
 app.post('/api/profile/:steamid/comments', authMiddleware, async (req, res) => {
   try {
+    const text = (req.body.text || '').trim();
+    if (!text) return res.status(400).json({ error: 'Empty comment' });
+
     const newComment = new Comment({
-      targetSteamId: req.params.steamid, authorSteamId: req.user.steamid,
-      authorName: req.user.name, authorAvatar: req.user.avatar, text: req.body.text.trim()
+      targetSteamId: req.params.steamid, 
+      authorSteamId: req.user.steamid,
+      authorName: req.user.name, 
+      authorAvatar: req.user.avatar, 
+      text
     });
     await newComment.save();
     res.status(201).json(newComment);
-  } catch (err) { res.status(500).json({ error: 'Failed to add comment' }); }
+  } catch (err) { 
+    res.status(500).json({ error: 'Failed to add comment' }); 
+  }
 });
 
 app.post('/api/commends/add', authMiddleware, async (req, res) => {
