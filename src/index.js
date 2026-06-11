@@ -149,7 +149,7 @@ const MatchQueueSchema = new mongoose.Schema({
   mmrank: { type: String, default: '' },
   mode: { type: String, default: 'Premier' },
   enteredAt: { type: Date, default: Date.now },
-  lastCheckedAt: { type: Date, default: Date.now } // Для отслеживания активных игроков
+  lastCheckedAt: { type: Date, default: Date.now } 
 });
 const MatchQueue = mongoose.model('MatchQueue', MatchQueueSchema);
 
@@ -297,12 +297,9 @@ app.post('/api/notifications/read', authMiddleware, async (req, res) => {
 
 // ===== УМНЫЙ МАТЧМЕЙКИНГ =====
 async function tryMatchmaking() {
-  // 1. Сборщик мусора (Garbage Collector)
-  // Удаляем игроков, которые закрыли вкладку и не обновляли статус поиска больше 15 секунд
   const staleThreshold = new Date(Date.now() - 15 * 1000);
   await MatchQueue.deleteMany({ lastCheckedAt: { $lt: staleThreshold } });
 
-  // 2. Поиск совпадений
   const queue = await MatchQueue.find().sort({ enteredAt: 1 });
   if (queue.length < 2) return; 
 
@@ -350,7 +347,6 @@ app.post('/api/matchmaking/start', authMiddleware, async (req, res) => {
   try {
     const existingLobby = await Lobby.findOne({ members: req.user.steamid });
     if (existingLobby) {
-      // Удаляем багованное одиночное лобби перед стартом нового поиска
       if (existingLobby.members.length <= 1) {
         await Lobby.findByIdAndDelete(existingLobby._id);
       } else {
@@ -370,7 +366,7 @@ app.post('/api/matchmaking/start', authMiddleware, async (req, res) => {
         mmrank: me?.mmrank || '', 
         mode: requestedMode, 
         enteredAt: new Date(),
-        lastCheckedAt: new Date() // Обновляем таймер активности
+        lastCheckedAt: new Date()
       },
       { upsert: true }
     );
@@ -381,18 +377,15 @@ app.post('/api/matchmaking/start', authMiddleware, async (req, res) => {
   }
 });
 
+// ==== ТУТ ГЛАВНОЕ ИЗМЕНЕНИЕ ДЛЯ ВАШЕЙ ЗАДАЧИ ====
 app.get('/api/matchmaking/status', authMiddleware, async (req, res) => {
   try {
     const lobby = await Lobby.findOne({ members: req.user.steamid });
     if (lobby) {
-      if (lobby.members.length <= 1) {
-        await Lobby.findByIdAndDelete(lobby._id);
-      } else {
-        return res.json({ status: 'found' });
-      }
+      // Если лобби есть (даже одиночное) - сразу перекидываем туда
+      return res.json({ status: 'found' });
     }
 
-    // При каждом запросе статуса обновляем lastCheckedAt (человек онлайн и ждёт)
     const q = await MatchQueue.findOneAndUpdate(
       { steamid: req.user.steamid },
       { lastCheckedAt: new Date() },
@@ -403,10 +396,14 @@ app.get('/api/matchmaking/status', authMiddleware, async (req, res) => {
 
     const elapsed = Math.floor((Date.now() - new Date(q.enteredAt).getTime()) / 1000);
     
-    // ТАЙМАУТ ПОИСКА - 10 МИНУТ (600 СЕКУНД)
+    // ТАЙМАУТ ПОИСКА - 45 СЕКУНД
     if (elapsed > 45) {
+      // 1. Удаляем из очереди ожидания
       await MatchQueue.deleteOne({ steamid: req.user.steamid });
-      return res.json({ status: 'timeout' });
+      // 2. Создаем ЛИЧНОЕ ЛОББИ для игрока
+      await Lobby.create({ ownerId: req.user.steamid, members: [req.user.steamid], gameMode: q.mode });
+      // 3. Отправляем found, чтобы фронтенд открыл экран лобби
+      return res.json({ status: 'found' });
     }
     
     await tryMatchmaking();
