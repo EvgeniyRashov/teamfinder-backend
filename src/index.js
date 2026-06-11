@@ -148,7 +148,8 @@ const MatchQueueSchema = new mongoose.Schema({
   faceit: { type: Number, default: 0 },
   mmrank: { type: String, default: '' },
   mode: { type: String, default: 'Premier' },
-  enteredAt: { type: Date, default: Date.now }
+  enteredAt: { type: Date, default: Date.now },
+  lastCheckedAt: { type: Date, default: Date.now } // Для отслеживания активных игроков
 });
 const MatchQueue = mongoose.model('MatchQueue', MatchQueueSchema);
 
@@ -294,13 +295,14 @@ app.post('/api/notifications/read', authMiddleware, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ===== МАТЧМЕЙКИНГ (ОБНОВЛЕННЫЙ С ОЧИСТКОЙ ПРИЗРАКОВ) =====
+// ===== УМНЫЙ МАТЧМЕЙКИНГ =====
 async function tryMatchmaking() {
-  // 1. ОЧИСТКА ПРИЗРАКОВ: Удаляем из поиска всех, кто висит там дольше 45 секунд 
-  // (значит человек просто закрыл вкладку и сломал очередь)
-  const staleThreshold = new Date(Date.now() - 45 * 1000);
-  await MatchQueue.deleteMany({ enteredAt: { $lt: staleThreshold } });
+  // 1. Сборщик мусора (Garbage Collector)
+  // Удаляем игроков, которые закрыли вкладку и не обновляли статус поиска больше 15 секунд
+  const staleThreshold = new Date(Date.now() - 15 * 1000);
+  await MatchQueue.deleteMany({ lastCheckedAt: { $lt: staleThreshold } });
 
+  // 2. Поиск совпадений
   const queue = await MatchQueue.find().sort({ enteredAt: 1 });
   if (queue.length < 2) return; 
 
@@ -348,6 +350,7 @@ app.post('/api/matchmaking/start', authMiddleware, async (req, res) => {
   try {
     const existingLobby = await Lobby.findOne({ members: req.user.steamid });
     if (existingLobby) {
+      // Удаляем багованное одиночное лобби перед стартом нового поиска
       if (existingLobby.members.length <= 1) {
         await Lobby.findByIdAndDelete(existingLobby._id);
       } else {
@@ -360,7 +363,15 @@ app.post('/api/matchmaking/start', authMiddleware, async (req, res) => {
     
     await MatchQueue.findOneAndUpdate(
       { steamid: req.user.steamid },
-      { steamid: req.user.steamid, elo: me?.elo || 0, faceit: me?.faceit || 0, mmrank: me?.mmrank || '', mode: requestedMode, enteredAt: new Date() },
+      { 
+        steamid: req.user.steamid, 
+        elo: me?.elo || 0, 
+        faceit: me?.faceit || 0, 
+        mmrank: me?.mmrank || '', 
+        mode: requestedMode, 
+        enteredAt: new Date(),
+        lastCheckedAt: new Date() // Обновляем таймер активности
+      },
       { upsert: true }
     );
     await tryMatchmaking();
@@ -381,14 +392,23 @@ app.get('/api/matchmaking/status', authMiddleware, async (req, res) => {
       }
     }
 
-    const q = await MatchQueue.findOne({ steamid: req.user.steamid });
+    // При каждом запросе статуса обновляем lastCheckedAt (человек онлайн и ждёт)
+    const q = await MatchQueue.findOneAndUpdate(
+      { steamid: req.user.steamid },
+      { lastCheckedAt: new Date() },
+      { new: true }
+    );
+    
     if (!q) return res.json({ status: 'none' });
 
     const elapsed = Math.floor((Date.now() - new Date(q.enteredAt).getTime()) / 1000);
-    if (elapsed > 30) {
+    
+    // ТАЙМАУТ ПОИСКА - 10 МИНУТ (600 СЕКУНД)
+    if (elapsed > 600) {
       await MatchQueue.deleteOne({ steamid: req.user.steamid });
       return res.json({ status: 'timeout' });
     }
+    
     await tryMatchmaking();
     res.json({ status: 'searching', elapsed });
   } catch(e) {
