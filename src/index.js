@@ -404,7 +404,7 @@ app.get('/api/matchmaking/status', authMiddleware, async (req, res) => {
     const elapsed = Math.floor((Date.now() - new Date(q.enteredAt).getTime()) / 1000);
     
     // ТАЙМАУТ ПОИСКА - 10 МИНУТ (600 СЕКУНД)
-    if (elapsed > 600) {
+    if (elapsed > 45) {
       await MatchQueue.deleteOne({ steamid: req.user.steamid });
       return res.json({ status: 'timeout' });
     }
