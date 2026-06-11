@@ -294,8 +294,13 @@ app.post('/api/notifications/read', authMiddleware, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ===== МАТЧМЕЙКИНГ (ЗДЕСЬ ФИКС ОДИНОЧНОГО ЛОББИ) =====
+// ===== МАТЧМЕЙКИНГ (ОБНОВЛЕННЫЙ С ОЧИСТКОЙ ПРИЗРАКОВ) =====
 async function tryMatchmaking() {
+  // 1. ОЧИСТКА ПРИЗРАКОВ: Удаляем из поиска всех, кто висит там дольше 45 секунд 
+  // (значит человек просто закрыл вкладку и сломал очередь)
+  const staleThreshold = new Date(Date.now() - 45 * 1000);
+  await MatchQueue.deleteMany({ enteredAt: { $lt: staleThreshold } });
+
   const queue = await MatchQueue.find().sort({ enteredAt: 1 });
   if (queue.length < 2) return; 
 
@@ -343,7 +348,6 @@ app.post('/api/matchmaking/start', authMiddleware, async (req, res) => {
   try {
     const existingLobby = await Lobby.findOne({ members: req.user.steamid });
     if (existingLobby) {
-      // ИСПРАВЛЕНИЕ: Если игрок один в лобби, удаляем это зависшее лобби и ищем заново
       if (existingLobby.members.length <= 1) {
         await Lobby.findByIdAndDelete(existingLobby._id);
       } else {
@@ -370,7 +374,6 @@ app.get('/api/matchmaking/status', authMiddleware, async (req, res) => {
   try {
     const lobby = await Lobby.findOne({ members: req.user.steamid });
     if (lobby) {
-      // ИСПРАВЛЕНИЕ: И здесь проверяем на зависшее лобби
       if (lobby.members.length <= 1) {
         await Lobby.findByIdAndDelete(lobby._id);
       } else {
