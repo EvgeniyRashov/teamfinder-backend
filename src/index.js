@@ -10,32 +10,45 @@ const mongoose     = require('mongoose');
 const app = express();
 app.set('trust proxy', 1);
 
+// ===== НАДЁЖНЫЕ НАСТРОЙКИ CORS =====
 const allowedOrigins = [
   'https://teamfinder-pwa.vercel.app',
   'http://localhost:3000',
   'http://127.0.0.1:5500',
   'http://localhost:5000'
 ];
+
 app.use(cors({
   origin: function(origin, callback) {
-    if (!origin || allowedOrigins.indexOf(origin) !== -1 || origin.endsWith('.vercel.app')) callback(null, true);
-    else callback(null, true);
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) !== -1 || origin.endsWith('.vercel.app')) {
+      callback(null, true);
+    } else {
+      callback(null, true);
+    }
   },
   credentials: true,
   methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
   allowedHeaders: 'Content-Type, Authorization, X-Requested-With, Accept'
 }));
+
 app.options('*', cors());
 app.use(cookieParser());
 app.use(express.json());
+
 app.get('/', (req, res) => res.send('TEAMFINDER Backend is running!'));
 
-if (!process.env.MONGODB_URI) { console.error('FATAL: MONGODB_URI not defined'); process.exit(1); }
+// ===== ПОДКЛЮЧЕНИЕ К MONGODB =====
+if (!process.env.MONGODB_URI) {
+  console.error("FATAL ERROR: MONGODB_URI is not defined.");
+  process.exit(1);
+}
+
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected'))
   .catch(err => console.error('MongoDB error', err));
 
-// ===== SCHEMAS =====
+// ===== СХЕМЫ БАЗЫ ДАННЫХ =====
 const UserSchema = new mongoose.Schema({
   steamid:         { type: String, unique: true, required: true },
   name:            String,
@@ -49,13 +62,15 @@ const UserSchema = new mongoose.Schema({
   mode:            { type: String, default: 'Premier' },
   region:          { type: String, default: 'any' },
   language:        { type: String, default: 'ru' },
-  trustScore:      { type: Number, default: 50 },
+  trustScore:      { type: Number, default: 50 }, 
   commends: {
     teamPlayer: { type: Number, default: 0 },
     friendly:   { type: Number, default: 0 },
     leader:     { type: Number, default: 0 }
   },
-  receivedLikes: [{ from: String, commendType: String, date: { type: Date, default: Date.now } }],
+  receivedLikes: [{
+    from: String, commendType: String, date: { type: Date, default: Date.now }
+  }],
   hasMic:          { type: Boolean, default: false },
   isLookingForTeam:{ type: Boolean, default: false },
   isOnline:        { type: Boolean, default: false },
@@ -71,15 +86,15 @@ const NotifSchema = new mongoose.Schema({
   userId: { type: String, required: true },
   type: String, icon: String, ic: String, title: String, body: String,
   time: { type: Date, default: Date.now }, unread: { type: Boolean, default: true },
-  actions: [String], payload: mongoose.Schema.Types.Mixed
+  actions: [String], payload: mongoose.Schema.Types.Mixed 
 });
 const Notification = mongoose.model('Notification', NotifSchema);
 
 const LobbySchema = new mongoose.Schema({
   ownerId: { type: String, required: true },
-  members: [{ type: String }],
+  members: [{ type: String }], 
   gameMode: { type: String, default: 'Premier' },
-  status: { type: String, default: 'waiting' },
+  status: { type: String, default: 'waiting' }, 
   autoFill: { type: Boolean, default: false }
 }, { timestamps: true });
 const Lobby = mongoose.model('Lobby', LobbySchema);
@@ -93,29 +108,34 @@ const MessageSchema = new mongoose.Schema({
 const Message = mongoose.model('Message', MessageSchema);
 
 const ReportSchema = new mongoose.Schema({
-  targetSteamId: { type: String, required: true }, authorSteamId: { type: String, required: true },
-  reason: { type: String, required: true }, details: { type: String, default: '' },
-  status: { type: String, default: 'Рассматривается' }, createdAt: { type: Date, default: Date.now }
+  targetSteamId: { type: String, required: true },
+  authorSteamId: { type: String, required: true },
+  reason: { type: String, required: true },
+  details: { type: String, default: '' },
+  status: { type: String, default: 'Рассматривается' }, 
+  createdAt: { type: Date, default: Date.now }
 });
 const Report = mongoose.model('Report', ReportSchema);
 
 const CommentSchema = new mongoose.Schema({
-  targetSteamId: { type: String, required: true }, authorSteamId: { type: String, required: true },
-  authorName: String, authorAvatar: String, text: { type: String, required: true },
+  targetSteamId: { type: String, required: true },
+  authorSteamId: { type: String, required: true },
+  authorName: { type: String },
+  authorAvatar: { type: String },
+  text: { type: String, required: true },
   createdAt: { type: Date, default: Date.now }
 });
 const Comment = mongoose.model('Comment', CommentSchema);
 
-// ===== MATCHQUEUE =====
 const MatchQueueSchema = new mongoose.Schema({
-  steamid:        { type: String, required: true, unique: true },
-  elo:            { type: Number, default: 0 },
-  faceit:         { type: Number, default: 0 },
-  mmrank:         { type: String, default: '' },
-  mode:           { type: String, default: 'Premier' },
-  enteredAt:      { type: Date, default: Date.now },
-  lastCheckedAt:  { type: Date, default: Date.now },
-  targetLobbyId:  { type: String, default: null }
+  steamid: { type: String, required: true, unique: true },
+  elo: { type: Number, default: 0 },
+  faceit: { type: Number, default: 0 },
+  mmrank: { type: String, default: '' },
+  mode: { type: String, default: 'Premier' },
+  enteredAt: { type: Date, default: Date.now },
+  lastCheckedAt: { type: Date, default: Date.now },
+  targetLobbyId: { type: String, default: null }
 });
 const MatchQueue = mongoose.model('MatchQueue', MatchQueueSchema);
 
@@ -125,23 +145,25 @@ const authMiddleware = (req, res, next) => {
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
   try {
     req.user = jwt.verify(token, process.env.JWT_SECRET);
-    if (!req.user?.steamid) return res.status(401).json({ error: 'Invalid user session' });
+    if (!req.user || !req.user.steamid) return res.status(401).json({ error: 'Invalid user session ID' });
     next();
-  } catch(err) { res.status(401).json({ error: 'Invalid token' }); }
+  } catch(err) {
+    res.status(401).json({ error: 'Invalid token' });
+  }
 };
 
-// ===== STEAM AUTH =====
+// ===== STEAM АВТОРИЗАЦИЯ =====
 const STEAM_OPENID = 'https://steamcommunity.com/openid/login';
 const RETURN_URL   = process.env.STEAM_RETURN_URL;
 const REALM        = process.env.STEAM_REALM;
 
 app.get('/auth/steam', (req, res) => {
   const params = querystring.stringify({
-    'openid.ns': 'http://specs.openid.net/auth/2.0',
-    'openid.mode': 'checkid_setup',
-    'openid.return_to': RETURN_URL,
-    'openid.realm': REALM,
-    'openid.identity': 'http://specs.openid.net/auth/2.0/identifier_select',
+    'openid.ns':         'http://specs.openid.net/auth/2.0',
+    'openid.mode':       'checkid_setup',
+    'openid.return_to':  RETURN_URL,
+    'openid.realm':      REALM,
+    'openid.identity':   'http://specs.openid.net/auth/2.0/identifier_select',
     'openid.claimed_id': 'http://specs.openid.net/auth/2.0/identifier_select',
   });
   res.redirect(`${STEAM_OPENID}?${params}`);
@@ -153,7 +175,8 @@ app.get('/auth/steam/authenticate', async (req, res) => {
     const body  = querystring.stringify(query);
     const response = await new Promise((resolve, reject) => {
       const options = {
-        hostname: 'steamcommunity.com', path: '/openid/login', method: 'POST',
+        hostname: 'steamcommunity.com', path: '/openid/login',
+        method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body) }
       };
       let data = '';
@@ -164,7 +187,9 @@ app.get('/auth/steam/authenticate', async (req, res) => {
     });
 
     if (!response.includes('is_valid:true')) return res.status(401).json({ error: 'Steam auth not valid' });
-    const steamId = req.query['openid.claimed_id'].replace('https://steamcommunity.com/openid/id/', '');
+
+    const claimedId = req.query['openid.claimed_id'];
+    const steamId   = claimedId.replace('https://steamcommunity.com/openid/id/', '');
 
     let p = null;
     try {
@@ -181,7 +206,9 @@ app.get('/auth/steam/authenticate', async (req, res) => {
 
     const token = jwt.sign({ steamid: steamId, name: p?.personaname || steamId, avatar: p?.avatarmedium || null }, process.env.JWT_SECRET, { expiresIn: '7d' });
     return res.redirect(`${process.env.CLIENT_ORIGIN}?token=${token}`);
-  } catch (err) { return res.status(500).json({ error: 'Steam authenticate failed' }); }
+  } catch (err) {
+    return res.status(500).json({ error: 'Steam authenticate failed' });
+  }
 });
 
 app.post('/auth/logout', authMiddleware, async (req, res) => {
@@ -211,13 +238,16 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     if (hasMic !== undefined) upd.hasMic = Boolean(hasMic);
     await User.findOneAndUpdate({ steamid: req.user.steamid }, upd);
     res.json({ ok: true });
-  } catch(err) { res.status(500).json({ error: 'Failed to update settings' }); }
+  } catch(err) {
+    res.status(500).json({ error: 'Failed to update settings' });
+  }
 });
 
 app.get('/api/players', async (req, res) => {
   try {
     const { role, region, language, minTrust, minElo, minFaceit, mmrank, hasMic, limit = 50 } = req.query;
     const filter = { steamid: { $nin: ['undefined', 'null'], $exists: true } };
+
     if (role && role !== 'any') filter.role = role;
     if (region && region !== 'any') filter.region = region;
     if (language && language !== 'any') filter.language = language;
@@ -226,17 +256,24 @@ app.get('/api/players', async (req, res) => {
     if (minElo) filter.elo = { $gte: Number(minElo) };
     if (minFaceit) filter.faceit = { $gte: Number(minFaceit) };
     if (hasMic === 'true') filter.hasMic = true;
-    const players = await User.find(filter).sort({ isOnline: -1, trustScore: -1 }).limit(Number(limit))
+
+    const players = await User.find(filter)
+      .sort({ isOnline: -1, trustScore: -1 })
+      .limit(Number(limit))
       .select('steamid name avatar nick bio elo faceit mmrank role mode region language trustScore hasMic isOnline isLookingForTeam lastSeen');
     res.json(players);
-  } catch(err) { res.status(500).json({ error: 'Failed to fetch players' }); }
+  } catch(err) {
+    res.status(500).json({ error: 'Failed to fetch players' });
+  }
 });
 
 app.get('/api/notifications', authMiddleware, async (req, res) => {
   try {
     const notifs = await Notification.find({ userId: req.user.steamid }).sort({ time: -1 });
     res.json(notifs);
-  } catch(err) { res.status(500).json({ error: 'Failed to fetch notifications' }); }
+  } catch(err) {
+    res.status(500).json({ error: 'Failed to fetch notifications' });
+  }
 });
 
 app.post('/api/notifications/read', authMiddleware, async (req, res) => {
@@ -452,7 +489,7 @@ app.get('/api/lobby/me', authMiddleware, async (req, res) => {
     const lobby = await Lobby.findOne({ members: req.user.steamid });
     if (!lobby) return res.json({ lobby: null });
     const membersData = await User.find({ steamid: { $in: lobby.members } })
-      .select('steamid name avatar role elo faceit mmrank isOnline');
+      .select('steamid name avatar role elo faceit mmrank isOnline trustScore hasMic');
     res.json({ lobby, membersData });
   } catch(err) { res.status(500).json({ error: 'Failed to fetch lobby' }); }
 });
@@ -520,11 +557,113 @@ app.post('/api/lobby/leave', authMiddleware, async (req, res) => {
 });
 
 // ===== ПРОФИЛИ, ДРУЗЬЯ, ОТЗЫВЫ =====
+
+// ВАЖНО: Маршрут для загрузки полного профиля (БД + STEAM API)
+app.get('/api/profile/:steamid', async (req, res) => {
+  const { steamid } = req.params;
+  const key = process.env.STEAM_API_KEY;
+  try {
+    // Делаем параллельные запросы к серверам Steam
+    const [summaryRes, statsRes, hoursRes] = await Promise.allSettled([
+      fetch(`https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${key}&steamids=${steamid}`),
+      fetch(`https://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v2/?key=${key}&steamid=${steamid}&appid=730`),
+      fetch(`https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${key}&steamid=${steamid}&appids_filter[0]=730&include_appinfo=false`)
+    ]);
+
+    let profile = null;
+    if (summaryRes.status === 'fulfilled' && summaryRes.value.ok) {
+      const data = await summaryRes.value.json();
+      const p = data.response?.players?.[0];
+      if (p) profile = { steamid: p.steamid, name: p.personaname, avatar: p.avatarfull, profileUrl: p.profileurl, status: p.personastate === 1 ? 'online' : 'offline', country: p.loccountrycode || null, createdAt: p.timecreated ? new Date(p.timecreated * 1000).getFullYear() : null };
+    }
+
+    let stats = null;
+    if (statsRes.status === 'fulfilled' && statsRes.value.ok) {
+      const data = await statsRes.value.json();
+      if (data.playerstats && data.playerstats.stats) {
+        const raw = data.playerstats.stats;
+        const getStat = (name) => raw.find(s => s.name === name)?.value || 0;
+        const kills = getStat('total_kills'), deaths = getStat('total_deaths'), wins = getStat('total_wins'), roundsPlayed = getStat('total_rounds_played'), headshotKills = getStat('total_kills_headshot'), shots = getStat('total_shots_fired'), hits = getStat('total_shots_hit');
+        stats = { kills, deaths, kd: deaths > 0 ? (kills / deaths).toFixed(2) : kills.toFixed(2), wins, roundsPlayed, winRate: roundsPlayed > 0 ? ((wins / roundsPlayed) * 100).toFixed(1) : '0', hsRate: kills > 0 ? ((headshotKills / kills) * 100).toFixed(1) : '0', mvps: getStat('total_mvps'), accuracy: shots > 0 ? ((hits / shots) * 100).toFixed(1) : '0' };
+      }
+    }
+
+    let hoursCs2 = null;
+    if (hoursRes.status === 'fulfilled' && hoursRes.value.ok) {
+      const data = await hoursRes.value.json();
+      const game = data.response?.games?.[0];
+      if (game) hoursCs2 = Math.round(game.playtime_forever / 60);
+    }
+
+    // Берем локальные данные из MongoDB (TrustScore, ELO и т.д.)
+    const dbUser = await User.findOne({ steamid }).select('elo faceit mmrank role mode region nick bio trustScore friends commends isOnline hasMic');
+    const reports = await Report.find({ targetSteamId: steamid }).sort({ createdAt: -1 }).limit(10);
+    
+    return res.json({ profile, stats, hoursCs2, gameData: dbUser || null, friends: dbUser?.friends || [], reports });
+  } catch(err) {
+    return res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+});
+
 app.get('/api/friends', authMiddleware, async (req, res) => {
   const user = await User.findOne({ steamid: req.user.steamid }).select('friends');
   if (!user?.friends) return res.json([]);
   const updated = await User.find({ steamid: { $in: user.friends.map(f => f.steamid) } }).select('steamid name avatar nick isOnline');
   res.json(updated);
+});
+
+// ДОБАВЛЕН РОУТ ДРУЗЕЙ (исправляет ошибку 404)
+app.post('/api/friends/add', authMiddleware, async (req, res) => {
+  try {
+    const { targetSteamId } = req.body;
+    if (!targetSteamId || targetSteamId === req.user.steamid) return res.status(400).json({ error: 'Некорректный ID пользователя' });
+    
+    const target = await User.findOne({ steamid: targetSteamId });
+    if (!target) return res.status(404).json({ error: 'Игрок не найден' });
+    if (target.friends && target.friends.some(f => f.steamid === req.user.steamid)) return res.status(400).json({ error: 'Вы уже в друзьях' });
+
+    const existing = await Notification.findOne({ userId: targetSteamId, type: 'friends', 'payload.senderId': req.user.steamid, unread: true });
+    if (existing) return res.status(400).json({ error: 'Запрос уже отправлен' });
+
+    const me = await User.findOne({ steamid: req.user.steamid });
+    await Notification.create({
+      userId: targetSteamId, type: 'friends', icon: '👋', ic: 'fr',
+      title: `Запрос в друзья от ${me.name}`,
+      body: `${me.mmrank || 'Без ранга'} · ${me.role || 'Any'} · ${me.elo || 0} ELO`,
+      unread: true, actions: ['Принять', 'Отклонить'],
+      payload: { senderId: me.steamid, senderName: me.name, senderAvatar: me.avatar, senderRole: me.role, senderElo: me.elo }
+    });
+    res.json({ ok: true });
+  } catch(err) { res.status(500).json({ error: 'Failed to add friend' }); }
+});
+
+app.post('/api/friends/accept', authMiddleware, async (req, res) => {
+  try {
+    const { notifId } = req.body;
+    const notif = await Notification.findOne({ _id: notifId, userId: req.user.steamid });
+    if (!notif) return res.status(404).json({ error: 'Уведомление не найдено' });
+
+    const sender = await User.findOne({ steamid: notif.payload.senderId });
+    const me = await User.findOne({ steamid: req.user.steamid });
+
+    const friendForMe = { steamid: sender.steamid, name: sender.name, avatar: sender.avatar, role: sender.role, elo: sender.elo, faceit: sender.faceit, mmrank: sender.mmrank };
+    const friendForSender = { steamid: me.steamid, name: me.name, avatar: me.avatar, role: me.role, elo: me.elo, faceit: me.faceit, mmrank: me.mmrank };
+
+    if (!me.friends) me.friends = [];
+    if (!me.friends.some(f => f.steamid === sender.steamid)) me.friends.push(friendForMe);
+
+    if (!sender.friends) sender.friends = [];
+    if (!sender.friends.some(f => f.steamid === me.steamid)) sender.friends.push(friendForSender);
+
+    await me.save();
+    await sender.save();
+
+    notif.unread = false;
+    notif.actions = [];
+    notif.body = `Вы приняли запрос от ${sender.name}`;
+    await notif.save();
+    res.json({ ok: true });
+  } catch(err) { res.status(500).json({ error: 'Failed to accept friend' }); }
 });
 
 app.get('/api/profile/:steamid/comments', async (req, res) => {
@@ -567,7 +706,8 @@ app.post('/api/commends/add', authMiddleware, async (req, res) => {
   } catch(err) { res.status(500).json({ error: 'Internal error' }); }
 });
 
-app.post('/api/reports/create', authMiddleware, async (req, res) => {
+// ИСПРАВЛЕНО ИМЯ МАРШРУТА ДЛЯ РЕПОРТОВ (add вместо create)
+app.post('/api/reports/add', authMiddleware, async (req, res) => {
   try {
     const { targetSteamId, reason, details } = req.body;
     if (!targetSteamId || !reason) return res.status(400).json({ error: 'Не указаны обязательные поля' });
@@ -575,15 +715,6 @@ app.post('/api/reports/create', authMiddleware, async (req, res) => {
     await report.save();
     res.status(201).json({ ok: true });
   } catch(err) { res.status(500).json({ error: 'Failed to create report' }); }
-});
-
-app.get('/api/profile/:steamid', async (req, res) => {
-  try {
-    const user = await User.findOne({ steamid: req.params.steamid })
-      .select('steamid name avatar nick bio elo faceit mmrank role mode region language trustScore commends hasMic isOnline isLookingForTeam lastSeen createdAt');
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    res.json(user);
-  } catch(err) { res.status(500).json({ error: 'Failed to fetch profile' }); }
 });
 
 // ЗАПУСК ИНТЕРВАЛА МАТЧМЕЙКИНГА (каждые 5 сек)
