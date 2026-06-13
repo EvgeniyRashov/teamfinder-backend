@@ -90,12 +90,18 @@ const NotifSchema = new mongoose.Schema({
 });
 const Notification = mongoose.model('Notification', NotifSchema);
 
+// ОБНОВЛЕННАЯ СХЕМА ЛОББИ С ЧАТОМ
 const LobbySchema = new mongoose.Schema({
   ownerId: { type: String, required: true },
   members: [{ type: String }], 
   gameMode: { type: String, default: 'Premier' },
   status: { type: String, default: 'waiting' }, 
-  autoFill: { type: Boolean, default: false }
+  autoFill: { type: Boolean, default: false },
+  messages: [{
+    senderId: String,
+    text: String,
+    time: { type: Date, default: Date.now }
+  }]
 }, { timestamps: true });
 const Lobby = mongoose.model('Lobby', LobbySchema);
 
@@ -287,7 +293,6 @@ async function tryMatchmaking() {
     const stale = new Date(Date.now() - 15 * 1000);
     await MatchQueue.deleteMany({ lastCheckedAt: { $lt: stale } });
 
-    // Шаг 1: Добор в существующие лобби (targetLobbyId)
     const autoFillEntries = await MatchQueue.find({ targetLobbyId: { $ne: null } });
     for (const entry of autoFillEntries) {
       const lobby = await Lobby.findById(entry.targetLobbyId);
@@ -306,7 +311,6 @@ async function tryMatchmaking() {
       await MatchQueue.deleteOne({ steamid: entry.steamid });
     }
 
-    // Шаг 2: Фоновый автодобор в лобби с autoFill: true
     const autoFillLobbies = await Lobby.find({ 
       autoFill: true, 
       status: 'waiting', 
@@ -332,10 +336,8 @@ async function tryMatchmaking() {
         }
     }
 
-    // Шаг 3: Обычный матчмейкинг для остальных
     const queue = await MatchQueue.find({ targetLobbyId: null }).sort({ enteredAt: 1 });
     if (queue.length < 2) {
-        // Проверка таймаута для одиночек (45 секунд)
         for (const p1 of queue) {
             const waitSec = (Date.now() - new Date(p1.enteredAt).getTime()) / 1000;
             if (waitSec > 45) {
@@ -494,6 +496,29 @@ app.get('/api/lobby/me', authMiddleware, async (req, res) => {
   } catch(err) { res.status(500).json({ error: 'Failed to fetch lobby' }); }
 });
 
+// ДОБАВЛЕН РОУТ ДЛЯ ЧАТА ЛОББИ
+app.post('/api/lobby/chat', authMiddleware, async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text) return res.status(400).json({ error: 'Пустое сообщение' });
+    
+    const lobby = await Lobby.findOne({ members: req.user.steamid });
+    if (!lobby) return res.status(400).json({ error: 'Вы не в лобби' });
+    
+    lobby.messages.push({ senderId: req.user.steamid, text, time: new Date() });
+    
+    // Оставляем только последние 50 сообщений, чтобы база не раздувалась
+    if(lobby.messages.length > 50) {
+      lobby.messages = lobby.messages.slice(-50);
+    }
+    
+    await lobby.save();
+    res.json({ ok: true });
+  } catch(e) {
+    res.status(500).json({ error: 'Ошибка отправки' });
+  }
+});
+
 app.post('/api/lobby/add-member', authMiddleware, async (req, res) => {
   try {
     const { targetId } = req.body;
@@ -558,12 +583,10 @@ app.post('/api/lobby/leave', authMiddleware, async (req, res) => {
 
 // ===== ПРОФИЛИ, ДРУЗЬЯ, ОТЗЫВЫ =====
 
-// ВАЖНО: Маршрут для загрузки полного профиля (БД + STEAM API)
 app.get('/api/profile/:steamid', async (req, res) => {
   const { steamid } = req.params;
   const key = process.env.STEAM_API_KEY;
   try {
-    // Делаем параллельные запросы к серверам Steam
     const [summaryRes, statsRes, hoursRes] = await Promise.allSettled([
       fetch(`https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${key}&steamids=${steamid}`),
       fetch(`https://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v2/?key=${key}&steamid=${steamid}&appid=730`),
@@ -595,7 +618,6 @@ app.get('/api/profile/:steamid', async (req, res) => {
       if (game) hoursCs2 = Math.round(game.playtime_forever / 60);
     }
 
-    // Берем локальные данные из MongoDB (TrustScore, ELO и т.д.)
     const dbUser = await User.findOne({ steamid }).select('elo faceit mmrank role mode region nick bio trustScore friends commends isOnline hasMic');
     const reports = await Report.find({ targetSteamId: steamid }).sort({ createdAt: -1 }).limit(10);
     
@@ -612,7 +634,6 @@ app.get('/api/friends', authMiddleware, async (req, res) => {
   res.json(updated);
 });
 
-// ДОБАВЛЕН РОУТ ДРУЗЕЙ (исправляет ошибку 404)
 app.post('/api/friends/add', authMiddleware, async (req, res) => {
   try {
     const { targetSteamId } = req.body;
@@ -706,7 +727,6 @@ app.post('/api/commends/add', authMiddleware, async (req, res) => {
   } catch(err) { res.status(500).json({ error: 'Internal error' }); }
 });
 
-// ИСПРАВЛЕНО ИМЯ МАРШРУТА ДЛЯ РЕПОРТОВ (add вместо create)
 app.post('/api/reports/add', authMiddleware, async (req, res) => {
   try {
     const { targetSteamId, reason, details } = req.body;
