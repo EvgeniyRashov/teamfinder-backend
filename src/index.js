@@ -90,7 +90,6 @@ const NotifSchema = new mongoose.Schema({
 });
 const Notification = mongoose.model('Notification', NotifSchema);
 
-// СХЕМА ЛОББИ С ЧАТОМ
 const LobbySchema = new mongoose.Schema({
   ownerId: { type: String, required: true },
   members: [{ type: String }], 
@@ -105,16 +104,14 @@ const LobbySchema = new mongoose.Schema({
 }, { timestamps: true });
 const Lobby = mongoose.model('Lobby', LobbySchema);
 
-// СХЕМА СООБЩЕНИЙ (ГЛОБАЛ И ЛС)
 const MessageSchema = new mongoose.Schema({
   senderId: { type: String, required: true },
-  receiverId: { type: String, required: true }, // 'global' для глобал чата
+  receiverId: { type: String, required: true }, // 'global' для глобал чата, или steamid для ЛС
   text: { type: String, required: true },
   isRead: { type: Boolean, default: false }
 }, { timestamps: true });
 const Message = mongoose.model('Message', MessageSchema);
 
-// СХЕМА РЕПОРТОВ
 const ReportSchema = new mongoose.Schema({
   targetSteamId: { type: String, required: true },
   authorSteamId: { type: String, required: true },
@@ -125,7 +122,6 @@ const ReportSchema = new mongoose.Schema({
 });
 const Report = mongoose.model('Report', ReportSchema);
 
-// СХЕМА КОММЕНТАРИЕВ (СТЕНА ПРОФИЛЯ)
 const CommentSchema = new mongoose.Schema({
   targetSteamId: { type: String, required: true },
   authorSteamId: { type: String, required: true },
@@ -633,9 +629,109 @@ app.get('/api/global-chat', async (req, res) => {
   }
 });
 
+// ===== ЛИЧНЫЕ СООБЩЕНИЯ (ЛС) =====
+
+app.get('/api/dm/dialogs', authMiddleware, async (req, res) => {
+  try {
+    const myId = req.user.steamid;
+    const messages = await Message.find({
+      $or: [{ senderId: myId }, { receiverId: myId }],
+      receiverId: { $ne: 'global' }
+    }).sort({ createdAt: -1 });
+
+    const dialogsMap = new Map();
+
+    messages.forEach(msg => {
+      const otherId = msg.senderId === myId ? msg.receiverId : msg.senderId;
+      if (!dialogsMap.has(otherId)) {
+        dialogsMap.set(otherId, {
+          lastMessage: msg.text,
+          time: msg.createdAt,
+          unread: (msg.receiverId === myId && !msg.isRead) ? 1 : 0,
+          otherId: otherId
+        });
+      } else {
+        if (msg.receiverId === myId && !msg.isRead) {
+          dialogsMap.get(otherId).unread += 1;
+        }
+      }
+    });
+
+    const dialogs = Array.from(dialogsMap.values());
+    const userIds = dialogs.map(d => d.otherId);
+    
+    const users = await User.find({ steamid: { $in: userIds } }).select('steamid name avatar isOnline');
+
+    const result = dialogs.map(d => {
+      const u = users.find(user => user.steamid === d.otherId);
+      return {
+        ...d,
+        name: u ? u.name : 'Неизвестный',
+        avatar: u ? u.avatar : null,
+        isOnline: u ? u.isOnline : false
+      };
+    });
+
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: 'Ошибка загрузки диалогов' });
+  }
+});
+
+app.get('/api/dm/:targetId', authMiddleware, async (req, res) => {
+  try {
+    const myId = req.user.steamid;
+    const targetId = req.params.targetId;
+
+    const messages = await Message.find({
+      $or: [
+        { senderId: myId, receiverId: targetId },
+        { senderId: targetId, receiverId: myId }
+      ]
+    }).sort({ createdAt: 1 }).limit(100);
+
+    await Message.updateMany(
+      { senderId: targetId, receiverId: myId, isRead: false },
+      { $set: { isRead: true } }
+    );
+
+    const result = messages.map(m => ({
+      id: m._id,
+      senderId: m.senderId,
+      text: m.text,
+      time: m.createdAt,
+      isRead: m.isRead
+    }));
+
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: 'Ошибка загрузки сообщений' });
+  }
+});
+
+app.post('/api/dm/:targetId', authMiddleware, async (req, res) => {
+  try {
+    const myId = req.user.steamid;
+    const targetId = req.params.targetId;
+    const { text } = req.body;
+
+    if (!text || !text.trim()) return res.status(400).json({ error: 'Пустое сообщение' });
+
+    const msg = new Message({
+      senderId: myId,
+      receiverId: targetId,
+      text: text.trim()
+    });
+    await msg.save();
+
+    res.json({ ok: true, msg });
+  } catch (e) {
+    res.status(500).json({ error: 'Ошибка отправки' });
+  }
+});
+
 // ===== ПРОФИЛИ, ДРУЗЬЯ, ОТЗЫВЫ =====
 
-// РОУТЫ КОММЕНТАРИЕВ ПРОФИЛЯ
 app.get('/api/profile/:steamid/comments', async (req, res) => {
   try {
     const comments = await Comment.find({ targetSteamId: req.params.steamid }).sort({ createdAt: -1 });
@@ -798,10 +894,8 @@ app.post('/api/reports/add', authMiddleware, async (req, res) => {
 
 // ===== ФОНОВЫЕ ЗАДАЧИ =====
 
-// 1. Интервал матчмейкинга (каждые 5 сек)
 setInterval(tryMatchmaking, 5000);
 
-// 2. АВТО-ОЧИСТКА ГЛОБАЛЬНОГО ЧАТА (СТАРШЕ 7 ДНЕЙ)
 async function cleanOldGlobalMessages() {
   try {
     const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
@@ -817,10 +911,7 @@ async function cleanOldGlobalMessages() {
   }
 }
 
-// Запускаем очистку раз в сутки
 setInterval(cleanOldGlobalMessages, 24 * 60 * 60 * 1000);
-
-// Вызываем один раз сразу при старте сервера
 cleanOldGlobalMessages();
 
 const PORT = process.env.PORT || 3001;
