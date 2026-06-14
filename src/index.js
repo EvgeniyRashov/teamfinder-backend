@@ -90,7 +90,7 @@ const NotifSchema = new mongoose.Schema({
 });
 const Notification = mongoose.model('Notification', NotifSchema);
 
-// ОБНОВЛЕННАЯ СХЕМА ЛОББИ С ЧАТОМ
+// СХЕМА ЛОББИ С ЧАТОМ
 const LobbySchema = new mongoose.Schema({
   ownerId: { type: String, required: true },
   members: [{ type: String }], 
@@ -107,7 +107,7 @@ const Lobby = mongoose.model('Lobby', LobbySchema);
 
 const MessageSchema = new mongoose.Schema({
   senderId: { type: String, required: true },
-  receiverId: { type: String, required: true },
+  receiverId: { type: String, required: true }, // 'global' для глобал чата
   text: { type: String, required: true },
   isRead: { type: Boolean, default: false }
 }, { timestamps: true });
@@ -485,7 +485,7 @@ app.post('/api/matchmaking/cancel', authMiddleware, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ===== ЛОББИ =====
+// ===== ЛОББИ И ЛОББИ-ЧАТ =====
 app.get('/api/lobby/me', authMiddleware, async (req, res) => {
   try {
     const lobby = await Lobby.findOne({ members: req.user.steamid });
@@ -496,7 +496,6 @@ app.get('/api/lobby/me', authMiddleware, async (req, res) => {
   } catch(err) { res.status(500).json({ error: 'Failed to fetch lobby' }); }
 });
 
-// ДОБАВЛЕН РОУТ ДЛЯ ЧАТА ЛОББИ
 app.post('/api/lobby/chat', authMiddleware, async (req, res) => {
   try {
     const { text } = req.body;
@@ -507,7 +506,7 @@ app.post('/api/lobby/chat', authMiddleware, async (req, res) => {
     
     lobby.messages.push({ senderId: req.user.steamid, text, time: new Date() });
     
-    // Оставляем только последние 50 сообщений, чтобы база не раздувалась
+    // Оставляем только последние 50 сообщений в лобби
     if(lobby.messages.length > 50) {
       lobby.messages = lobby.messages.slice(-50);
     }
@@ -581,8 +580,59 @@ app.post('/api/lobby/leave', authMiddleware, async (req, res) => {
   } catch(err) { res.status(500).json({ error: 'Failed to leave lobby' }); }
 });
 
-// ===== ПРОФИЛИ, ДРУЗЬЯ, ОТЗЫВЫ =====
+// ===== ГЛОБАЛЬНЫЙ ЧАТ =====
+app.post('/api/global-chat', authMiddleware, async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text) return res.status(400).json({ error: 'Пусто' });
+    
+    const msg = new Message({
+      senderId: req.user.steamid,
+      receiverId: 'global',
+      text: text
+    });
+    await msg.save();
+    
+    // Мягкий лимит на 100 сообщений
+    const count = await Message.countDocuments({ receiverId: 'global' });
+    if(count > 100) {
+       const oldest = await Message.find({ receiverId: 'global' }).sort({ createdAt: 1 }).limit(count - 100);
+       const ids = oldest.map(m => m._id);
+       await Message.deleteMany({ _id: { $in: ids } });
+    }
+    
+    res.json({ ok: true });
+  } catch(e) {
+    res.status(500).json({ error: 'Ошибка' });
+  }
+});
 
+app.get('/api/global-chat', async (req, res) => {
+  try {
+    const messages = await Message.find({ receiverId: 'global' }).sort({ createdAt: 1 }).limit(100);
+    
+    const steamIds = [...new Set(messages.map(m => m.senderId))];
+    const users = await User.find({ steamid: { $in: steamIds } }).select('steamid name avatar');
+    
+    const result = messages.map(m => {
+      const u = users.find(user => user.steamid === m.senderId);
+      return {
+        _id: m._id,
+        senderId: m.senderId,
+        text: m.text,
+        time: m.createdAt,
+        name: u ? u.name : 'Игрок',
+        avatar: u ? u.avatar : null
+      };
+    });
+    
+    res.json(result);
+  } catch(e) {
+    res.status(500).json({ error: 'Ошибка' });
+  }
+});
+
+// ===== ПРОФИЛИ, ДРУЗЬЯ, ОТЗЫВЫ =====
 app.get('/api/profile/:steamid', async (req, res) => {
   const { steamid } = req.params;
   const key = process.env.STEAM_API_KEY;
@@ -687,23 +737,6 @@ app.post('/api/friends/accept', authMiddleware, async (req, res) => {
   } catch(err) { res.status(500).json({ error: 'Failed to accept friend' }); }
 });
 
-app.get('/api/profile/:steamid/comments', async (req, res) => {
-  try {
-    const comments = await Comment.find({ targetSteamId: req.params.steamid }).sort({ createdAt: -1 });
-    res.json(comments);
-  } catch(err) { res.status(500).json({ error: 'Failed to fetch comments' }); }
-});
-
-app.post('/api/profile/:steamid/comments', authMiddleware, async (req, res) => {
-  try {
-    const text = (req.body.text || '').trim();
-    if (!text) return res.status(400).json({ error: 'Empty comment' });
-    const c = new Comment({ targetSteamId: req.params.steamid, authorSteamId: req.user.steamid, authorName: req.user.name, authorAvatar: req.user.avatar, text });
-    await c.save();
-    res.status(201).json(c);
-  } catch(err) { res.status(500).json({ error: 'Failed to add comment' }); }
-});
-
 app.post('/api/commends/add', authMiddleware, async (req, res) => {
   try {
     const { targetSteamId, type } = req.body;
@@ -737,8 +770,37 @@ app.post('/api/reports/add', authMiddleware, async (req, res) => {
   } catch(err) { res.status(500).json({ error: 'Failed to create report' }); }
 });
 
-// ЗАПУСК ИНТЕРВАЛА МАТЧМЕЙКИНГА (каждые 5 сек)
+// ===== ФОНОВЫЕ ЗАДАЧИ =====
+
+// 1. Интервал матчмейкинга (каждые 5 сек)
 setInterval(tryMatchmaking, 5000);
+
+// 2. АВТО-ОЧИСТКА ГЛОБАЛЬНОГО ЧАТА (СТАРШЕ 7 ДНЕЙ)
+async function cleanOldGlobalMessages() {
+  try {
+    // Получаем дату ровно 7 дней назад
+    const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    
+    // Удаляем из базы все глобальные сообщения, созданные раньше этой даты
+    const result = await Message.deleteMany({ 
+      receiverId: 'global', 
+      createdAt: { $lt: oneWeekAgo } 
+    });
+    
+    if (result.deletedCount > 0) {
+      console.log(`Очистка: удалено ${result.deletedCount} старых сообщений из глобал-чата.`);
+    }
+  } catch (err) {
+    console.error('Ошибка авто-очистки чата:', err);
+  }
+}
+
+// Запускаем очистку раз в сутки
+setInterval(cleanOldGlobalMessages, 24 * 60 * 60 * 1000);
+
+// Вызываем один раз сразу при старте сервера
+cleanOldGlobalMessages();
+
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`TEAMFINDER server running on port ${PORT}`));
