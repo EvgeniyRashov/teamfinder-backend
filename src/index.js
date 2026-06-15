@@ -587,6 +587,14 @@ app.post('/api/lobby/chat', authMiddleware, async (req, res) => {
   try {
     const { text } = req.body;
     if (!text) return res.status(400).json({ error: 'Пустое сообщение' });
+
+    const badWords = ['хуй', 'пизд', 'пидор', 'уебок', 'даун', 'шлюх', 'гандон', 'бляд', 'блят', 'сука', 'сучк', 'еблан', 'чурк', 'хач', 'нигер', 'ниггер', 'мать еб', 'мамашу', 'выбляд', 'хейт', 'мразь'];
+    const lowerText = text.toLowerCase();
+    for (const word of badWords) {
+      if (lowerText.includes(word)) {
+        return res.status(400).json({ error: 'Ваше сообщение заблокировано фильтром токсичности.' });
+      }
+    }
     
     const lobby = await Lobby.findOne({ members: req.user.steamid });
     if (!lobby) return res.status(400).json({ error: 'Вы не в лобби' });
@@ -671,6 +679,14 @@ app.post('/api/global-chat', authMiddleware, async (req, res) => {
   try {
     const { text } = req.body;
     if (!text) return res.status(400).json({ error: 'Пусто' });
+
+    const badWords = ['хуй', 'пизд', 'пидор', 'уебок', 'даун', 'шлюх', 'гандон', 'бляд', 'блят', 'сука', 'сучк', 'еблан', 'чурк', 'хач', 'нигер', 'ниггер', 'мать еб', 'мамашу', 'выбляд', 'хейт', 'мразь'];
+    const lowerText = text.toLowerCase();
+    for (const word of badWords) {
+      if (lowerText.includes(word)) {
+        return res.status(400).json({ error: 'Ваше сообщение заблокировано фильтром токсичности.' });
+      }
+    }
     
     const msg = new Message({
       senderId: req.user.steamid,
@@ -807,6 +823,14 @@ app.post('/api/dm/:targetId', authMiddleware, async (req, res) => {
 
     if (!text || !text.trim()) return res.status(400).json({ error: 'Пустое сообщение' });
 
+    const badWords = ['хуй', 'пизд', 'пидор', 'уебок', 'даун', 'шлюх', 'гандон', 'бляд', 'блят', 'сука', 'сучк', 'еблан', 'чурк', 'хач', 'нигер', 'ниггер', 'мать еб', 'мамашу', 'выбляд', 'хейт', 'мразь'];
+    const lowerText = text.toLowerCase();
+    for (const word of badWords) {
+      if (lowerText.includes(word)) {
+        return res.status(400).json({ error: 'Ваше сообщение заблокировано фильтром токсичности.' });
+      }
+    }
+
     const msg = new Message({
       senderId: myId,
       receiverId: targetId,
@@ -851,17 +875,21 @@ app.post('/api/dm/:targetId', authMiddleware, async (req, res) => {
 
 // ===== ПРОФИЛИ, ДРУЗЬЯ, ОТЗЫВЫ =====
 
-app.get('/api/profile/:steamid/comments', async (req, res) => {
-  try {
-    const comments = await Comment.find({ targetSteamId: req.params.steamid }).sort({ createdAt: -1 });
-    res.json(comments);
-  } catch(err) { res.status(500).json({ error: 'Failed to fetch comments' }); }
-});
-
 app.post('/api/profile/:steamid/comments', authMiddleware, async (req, res) => {
   try {
     const text = (req.body.text || '').trim();
     if (!text) return res.status(400).json({ error: 'Empty comment' });
+
+    // Простая система фильтрации токсичности/мата/расизма
+    const badWords = ['хуй', 'пизд', 'пидор', 'уебок', 'даун', 'шлюх', 'гандон', 'бляд', 'блят', 'сука', 'сучк', 'еблан', 'чурк', 'хач', 'нигер', 'ниггер', 'мать еб', 'мамашу', 'выбляд', 'хейт', 'мразь'];
+    const lowerText = text.toLowerCase();
+    
+    for (const word of badWords) {
+      if (lowerText.includes(word)) {
+        return res.status(400).json({ error: 'Ваш комментарий содержит запрещенные слова (мат/токсичность) и был заблокирован.' });
+      }
+    }
+
     const c = new Comment({ 
       targetSteamId: req.params.steamid, 
       authorSteamId: req.user.steamid, 
@@ -872,6 +900,22 @@ app.post('/api/profile/:steamid/comments', authMiddleware, async (req, res) => {
     await c.save();
     res.status(201).json(c);
   } catch(err) { res.status(500).json({ error: 'Failed to add comment' }); }
+});
+
+app.delete('/api/profile/comments/:id', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    await Comment.findByIdAndDelete(req.params.id);
+    res.json({ ok: true });
+  } catch(err) { 
+    res.status(500).json({ error: 'Failed to delete comment' }); 
+  }
+});
+
+app.get('/api/profile/:steamid/comments', async (req, res) => {
+  try {
+    const comments = await Comment.find({ targetSteamId: req.params.steamid }).sort({ createdAt: -1 });
+    res.json(comments);
+  } catch(err) { res.status(500).json({ error: 'Failed to fetch comments' }); }
 });
 
 app.get('/api/profile/:steamid', async (req, res) => {
