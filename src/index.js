@@ -63,6 +63,8 @@ const UserSchema = new mongoose.Schema({
   region:          { type: String, default: 'any' },
   language:        { type: String, default: 'ru' },
   trustScore:      { type: Number, default: 50 }, 
+  isAdmin:         { type: Boolean, default: false }, // АДМИН
+  isBanned:        { type: Boolean, default: false }, // БАН
   commends: {
     teamPlayer: { type: Number, default: 0 },
     friendly:   { type: Number, default: 0 },
@@ -106,7 +108,7 @@ const Lobby = mongoose.model('Lobby', LobbySchema);
 
 const MessageSchema = new mongoose.Schema({
   senderId: { type: String, required: true },
-  receiverId: { type: String, required: true }, // 'global' для глобал чата, или steamid для ЛС
+  receiverId: { type: String, required: true }, 
   text: { type: String, required: true },
   isRead: { type: Boolean, default: false }
 }, { timestamps: true });
@@ -144,16 +146,34 @@ const MatchQueueSchema = new mongoose.Schema({
 });
 const MatchQueue = mongoose.model('MatchQueue', MatchQueueSchema);
 
-const authMiddleware = (req, res, next) => {
+const authMiddleware = async (req, res, next) => {
   const auth  = req.headers.authorization;
   const token = auth?.startsWith('Bearer ') ? auth.slice(7) : req.cookies?.tf_token;
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET);
-    if (!req.user || !req.user.steamid) return res.status(401).json({ error: 'Invalid user session ID' });
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (!decoded || !decoded.steamid) return res.status(401).json({ error: 'Invalid user session ID' });
+    
+    // Проверка на БАН
+    const user = await User.findOne({ steamid: decoded.steamid });
+    if (user && user.isBanned) {
+      return res.status(403).json({ error: 'Ваш аккаунт заблокирован на платформе.' });
+    }
+    
+    req.user = decoded;
     next();
   } catch(err) {
     res.status(401).json({ error: 'Invalid token' });
+  }
+};
+
+const adminMiddleware = async (req, res, next) => {
+  try {
+    const user = await User.findOne({ steamid: req.user.steamid });
+    if (!user || !user.isAdmin) return res.status(403).json({ error: 'Доступ запрещен. Только для администраторов.' });
+    next();
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
   }
 };
 
@@ -203,9 +223,19 @@ app.get('/auth/steam/authenticate', async (req, res) => {
       p = apiData.response?.players?.[0];
     } catch (e) {}
 
+    // Если это ваш SteamID - выдаем админку автоматически!
+    const isOwner = steamId === '76561198269553115';
+
     await User.findOneAndUpdate(
       { steamid: steamId },
-      { steamid: steamId, name: p?.personaname || steamId, avatar: p?.avatarmedium || null, isOnline: true, lastSeen: new Date() },
+      { 
+        steamid: steamId, 
+        name: p?.personaname || steamId, 
+        avatar: p?.avatarmedium || null, 
+        isOnline: true, 
+        lastSeen: new Date(),
+        ...(isOwner && { isAdmin: true }) // Назначаем владельца админом
+      },
       { upsert: true, new: true }
     );
 
@@ -219,6 +249,64 @@ app.get('/auth/steam/authenticate', async (req, res) => {
 app.post('/auth/logout', authMiddleware, async (req, res) => {
   await User.findOneAndUpdate({ steamid: req.user.steamid }, { isOnline: false });
   res.json({ ok: true });
+});
+
+// ===== АДМИН-ПАНЕЛЬ =====
+
+app.get('/api/admin/stats', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const usersCount = await User.countDocuments();
+    const bannedCount = await User.countDocuments({ isBanned: true });
+    const lobbiesCount = await Lobby.countDocuments();
+    const reportsCount = await Report.countDocuments({ status: 'Рассматривается' });
+    res.json({ usersCount, bannedCount, lobbiesCount, reportsCount });
+  } catch (e) { res.status(500).json({ error: 'Ошибка сервера' }); }
+});
+
+app.get('/api/admin/reports', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const reports = await Report.find().sort({ createdAt: -1 }).limit(50);
+    res.json(reports);
+  } catch (e) { res.status(500).json({ error: 'Ошибка сервера' }); }
+});
+
+app.post('/api/admin/reports/:id/resolve', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    await Report.findByIdAndUpdate(req.params.id, { status: 'Рассмотрено' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'Ошибка сервера' }); }
+});
+
+app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { search } = req.query;
+    let query = {};
+    if (search) {
+      query = { $or: [{ steamid: search }, { name: { $regex: search, $options: 'i' } }] };
+    }
+    const users = await User.find(query).sort({ createdAt: -1 }).limit(30).select('steamid name avatar trustScore isBanned isAdmin isOnline createdAt');
+    res.json(users);
+  } catch (e) { res.status(500).json({ error: 'Ошибка сервера' }); }
+});
+
+app.post('/api/admin/users/:steamid/ban', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const target = await User.findOne({ steamid: req.params.steamid });
+    if (!target) return res.status(404).json({ error: 'Пользователь не найден' });
+    if (target.isAdmin) return res.status(400).json({ error: 'Нельзя забанить администратора' });
+    
+    target.isBanned = !target.isBanned;
+    await target.save();
+    res.json({ ok: true, isBanned: target.isBanned });
+  } catch (e) { res.status(500).json({ error: 'Ошибка сервера' }); }
+});
+
+app.post('/api/admin/users/:steamid/trust', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { trust } = req.body;
+    await User.findOneAndUpdate({ steamid: req.params.steamid }, { trustScore: Number(trust) });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'Ошибка сервера' }); }
 });
 
 // ===== ПРОФИЛЬ И НАСТРОЙКИ =====
@@ -251,7 +339,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
 app.get('/api/players', async (req, res) => {
   try {
     const { role, region, language, minTrust, minElo, minFaceit, mmrank, hasMic, limit = 50 } = req.query;
-    const filter = { steamid: { $nin: ['undefined', 'null'], $exists: true } };
+    const filter = { steamid: { $nin: ['undefined', 'null'], $exists: true }, isBanned: { $ne: true } };
 
     if (role && role !== 'any') filter.role = role;
     if (region && region !== 'any') filter.region = region;
@@ -265,7 +353,7 @@ app.get('/api/players', async (req, res) => {
     const players = await User.find(filter)
       .sort({ isOnline: -1, trustScore: -1 })
       .limit(Number(limit))
-      .select('steamid name avatar nick bio elo faceit mmrank role mode region language trustScore hasMic isOnline isLookingForTeam lastSeen');
+      .select('steamid name avatar nick bio elo faceit mmrank role mode region language trustScore hasMic isOnline isLookingForTeam lastSeen isAdmin');
     res.json(players);
   } catch(err) {
     res.status(500).json({ error: 'Failed to fetch players' });
@@ -490,7 +578,7 @@ app.get('/api/lobby/me', authMiddleware, async (req, res) => {
     const lobby = await Lobby.findOne({ members: req.user.steamid });
     if (!lobby) return res.json({ lobby: null });
     const membersData = await User.find({ steamid: { $in: lobby.members } })
-      .select('steamid name avatar role elo faceit mmrank isOnline trustScore hasMic');
+      .select('steamid name avatar role elo faceit mmrank isOnline trustScore hasMic isAdmin');
     res.json({ lobby, membersData });
   } catch(err) { res.status(500).json({ error: 'Failed to fetch lobby' }); }
 });
@@ -609,7 +697,7 @@ app.get('/api/global-chat', async (req, res) => {
     const messages = await Message.find({ receiverId: 'global' }).sort({ createdAt: 1 }).limit(100);
     
     const steamIds = [...new Set(messages.map(m => m.senderId))];
-    const users = await User.find({ steamid: { $in: steamIds } }).select('steamid name avatar');
+    const users = await User.find({ steamid: { $in: steamIds } }).select('steamid name avatar isAdmin');
     
     const result = messages.map(m => {
       const u = users.find(user => user.steamid === m.senderId);
@@ -619,7 +707,8 @@ app.get('/api/global-chat', async (req, res) => {
         text: m.text,
         time: m.createdAt,
         name: u ? u.name : 'Игрок',
-        avatar: u ? u.avatar : null
+        avatar: u ? u.avatar : null,
+        isAdmin: u ? u.isAdmin : false
       };
     });
     
@@ -660,7 +749,7 @@ app.get('/api/dm/dialogs', authMiddleware, async (req, res) => {
     const dialogs = Array.from(dialogsMap.values());
     const userIds = dialogs.map(d => d.otherId);
     
-    const users = await User.find({ steamid: { $in: userIds } }).select('steamid name avatar isOnline');
+    const users = await User.find({ steamid: { $in: userIds } }).select('steamid name avatar isOnline isAdmin');
 
     const result = dialogs.map(d => {
       const u = users.find(user => user.steamid === d.otherId);
@@ -668,7 +757,8 @@ app.get('/api/dm/dialogs', authMiddleware, async (req, res) => {
         ...d,
         name: u ? u.name : 'Неизвестный',
         avatar: u ? u.avatar : null,
-        isOnline: u ? u.isOnline : false
+        isOnline: u ? u.isOnline : false,
+        isAdmin: u ? u.isAdmin : false
       };
     });
 
@@ -790,7 +880,7 @@ app.get('/api/profile/:steamid', async (req, res) => {
       if (game) hoursCs2 = Math.round(game.playtime_forever / 60);
     }
 
-    const dbUser = await User.findOne({ steamid }).select('elo faceit mmrank role mode region nick bio trustScore friends commends isOnline hasMic');
+    const dbUser = await User.findOne({ steamid }).select('elo faceit mmrank role mode region nick bio trustScore friends commends isOnline hasMic isAdmin isBanned');
     const reports = await Report.find({ targetSteamId: steamid }).sort({ createdAt: -1 }).limit(10);
     
     return res.json({ profile, stats, hoursCs2, gameData: dbUser || null, friends: dbUser?.friends || [], reports });
@@ -802,7 +892,7 @@ app.get('/api/profile/:steamid', async (req, res) => {
 app.get('/api/friends', authMiddleware, async (req, res) => {
   const user = await User.findOne({ steamid: req.user.steamid }).select('friends');
   if (!user?.friends) return res.json([]);
-  const updated = await User.find({ steamid: { $in: user.friends.map(f => f.steamid) } }).select('steamid name avatar nick isOnline');
+  const updated = await User.find({ steamid: { $in: user.friends.map(f => f.steamid) } }).select('steamid name avatar nick isOnline isAdmin');
   res.json(updated);
 });
 
