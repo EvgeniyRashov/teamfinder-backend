@@ -814,6 +814,35 @@ app.post('/api/dm/:targetId', authMiddleware, async (req, res) => {
     });
     await msg.save();
 
+    // Создаем глобальное уведомление о новом сообщении (если еще нет непрочитанного от этого юзера)
+    const existingNotif = await Notification.findOne({ 
+      userId: targetId, 
+      type: 'message', 
+      'payload.senderId': myId, 
+      unread: true 
+    });
+    
+    const me = await User.findOne({ steamid: myId });
+
+    if (!existingNotif) {
+      await Notification.create({
+        userId: targetId,
+        type: 'message',
+        icon: '✉️',
+        ic: 'msg',
+        title: `Новое сообщение от ${me.name}`,
+        body: text.trim().length > 30 ? text.trim().slice(0, 30) + '...' : text.trim(),
+        unread: true,
+        actions: ['Ответить'],
+        payload: { senderId: myId, senderName: me.name, senderAvatar: me.avatar }
+      });
+    } else {
+      // Обновляем текст последнего сообщения, если уведомление уже висит
+      existingNotif.body = text.trim().length > 30 ? text.trim().slice(0, 30) + '...' : text.trim();
+      existingNotif.time = new Date();
+      await existingNotif.save();
+    }
+
     res.json({ ok: true, msg });
   } catch (e) {
     res.status(500).json({ error: 'Ошибка отправки' });
