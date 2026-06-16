@@ -274,7 +274,23 @@ app.get('/api/admin/reports', authMiddleware, adminMiddleware, async (req, res) 
 
 app.post('/api/admin/reports/:id/resolve', authMiddleware, adminMiddleware, async (req, res) => {
   try {
-    await Report.findByIdAndUpdate(req.params.id, { status: 'Рассмотрено' });
+    const { action } = req.body; // 'accept' or 'reject'
+    const report = await Report.findById(req.params.id);
+    if(!report) return res.status(404).json({ error: 'Репорт не найден' });
+
+    if(action === 'accept') {
+      report.status = 'Подтвержден';
+      // Снимаем trustScore
+      const targetUser = await User.findOne({ steamid: report.targetSteamId });
+      if(targetUser) {
+        targetUser.trustScore = Math.max(0, (targetUser.trustScore || 50) - 2);
+        await targetUser.save();
+      }
+    } else {
+      report.status = 'Отклонен';
+    }
+    
+    await report.save();
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'Ошибка сервера' }); }
 });
@@ -441,7 +457,7 @@ async function tryMatchmaking() {
 
     const matchedIds = new Set();
     for (let i = 0; i < queue.length; i++) {
-      if (matchedIds.has(queue[i].steamid)) continue;
+      if (matchedIds.has(queue[j].steamid)) continue;
       const p1 = queue[i];
       const waitSec = (Date.now() - new Date(p1.enteredAt).getTime()) / 1000;
 
@@ -1038,7 +1054,7 @@ app.post('/api/commends/add', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Уже поставили лайк в этой категории' });
     }
 
-    const newTrust = Math.min(100, (targetUser.trustScore || 50) + 1);
+    const newTrust = Math.min(100, Math.round(((targetUser.trustScore || 50) + 0.2) * 10) / 10);
     await User.findOneAndUpdate(
       { steamid: targetSteamId },
       { $inc: { [`commends.${type}`]: 1 }, $set: { trustScore: newTrust }, $push: { receivedLikes: { from: authorSteamId, commendType: type } } }
