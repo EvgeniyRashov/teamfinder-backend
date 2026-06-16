@@ -34,7 +34,8 @@ app.use(cors({
 
 app.options('*', cors());
 app.use(cookieParser());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 app.get('/', (req, res) => res.send('TEAMFINDER Backend is running!'));
 
@@ -119,6 +120,7 @@ const ReportSchema = new mongoose.Schema({
   authorSteamId: { type: String, required: true },
   reason: { type: String, required: true },
   details: { type: String, default: '' },
+  screenshot: { type: String, default: '' },
   status: { type: String, default: 'Рассматривается' }, 
   createdAt: { type: Date, default: Date.now }
 });
@@ -1047,9 +1049,9 @@ app.post('/api/commends/add', authMiddleware, async (req, res) => {
 
 app.post('/api/reports/add', authMiddleware, async (req, res) => {
   try {
-    const { targetSteamId, reason, details } = req.body;
+    const { targetSteamId, reason, details, screenshot } = req.body;
     if (!targetSteamId || !reason) return res.status(400).json({ error: 'Не указаны обязательные поля' });
-    const report = new Report({ targetSteamId, authorSteamId: req.user.steamid, reason, details });
+    const report = new Report({ targetSteamId, authorSteamId: req.user.steamid, reason, details, screenshot: screenshot || '' });
     await report.save();
     res.status(201).json({ ok: true });
   } catch(err) { res.status(500).json({ error: 'Failed to create report' }); }
